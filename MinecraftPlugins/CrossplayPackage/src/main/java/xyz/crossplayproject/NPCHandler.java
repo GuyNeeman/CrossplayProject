@@ -6,6 +6,7 @@ import net.citizensnpcs.api.npc.NPC;
 import net.citizensnpcs.trait.SkinTrait;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
@@ -13,6 +14,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.server.ServerCommandEvent;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.util.Vector;
@@ -44,7 +47,6 @@ public class NPCHandler implements Listener {
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         // Send tab-list ADD for every online Roblox NPC to the newly joined player.
-        // Delay 5 ticks so the client connection handshake is fully complete.
         new BukkitRunnable() {
             @Override
             public void run() {
@@ -60,23 +62,25 @@ public class NPCHandler implements Listener {
     }
 
     /**
-     * Intercepts commands so Roblox players can be targeted by name just like real players.
-     *
-     *   /tp &lt;robloxname&gt;           — teleport the sender to the Roblox NPC
-     *   /tp &lt;player&gt; &lt;robloxname&gt;  — teleport &lt;player&gt; to the Roblox NPC
+     * Intercepts player-typed commands that reference Roblox player names.
+     * Covers: /tp, /give, /kill
      */
     @EventHandler
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
-        String[] parts = event.getMessage().trim().split("\\s+");
+        // Strip leading slash and split
+        String[] parts = event.getMessage().trim().replaceFirst("^/", "").split("\\s+");
+        if (parts.length == 0) return;
 
-        if (parts.length == 2 && parts[0].equalsIgnoreCase("/tp")) {
+        String cmd = parts[0].toLowerCase();
+
+        if (cmd.equals("tp") && parts.length == 2) {
             NPC npc = npcs.get(parts[1]);
             if (npc != null && npc.isSpawned()) {
                 event.setCancelled(true);
                 event.getPlayer().teleport(npc.getEntity().getLocation());
                 event.getPlayer().sendMessage("§7[RB]§f Teleported to Roblox player §e" + parts[1]);
             }
-        } else if (parts.length == 3 && parts[0].equalsIgnoreCase("/tp")) {
+        } else if (cmd.equals("tp") && parts.length == 3) {
             NPC npc = npcs.get(parts[2]);
             if (npc != null && npc.isSpawned()) {
                 event.setCancelled(true);
@@ -89,7 +93,63 @@ public class NPCHandler implements Listener {
                     event.getPlayer().sendMessage("§cPlayer §e" + parts[1] + "§c not found.");
                 }
             }
+        } else if (cmd.equals("give") && parts.length >= 3) {
+            handleGive(parts, event.getPlayer().getName());
+            if (npcs.containsKey(parts[1])) event.setCancelled(true);
+        } else if (cmd.equals("kill") && parts.length == 2 && npcs.containsKey(parts[1])) {
+            event.setCancelled(true);
+            String robloxName = parts[1];
+            new BukkitRunnable() {
+                @Override public void run() { PlayerUpdate.despawnNPC(robloxName); }
+            }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
+            event.getPlayer().sendMessage("§7[RB]§f Removed Roblox player §e" + robloxName);
         }
+    }
+
+    /** Intercepts console commands that reference Roblox player names. */
+    @EventHandler
+    public void onServerCommand(ServerCommandEvent event) {
+        String[] parts = event.getCommand().trim().split("\\s+");
+        if (parts.length == 0) return;
+        String cmd = parts[0].toLowerCase();
+
+        if (cmd.equals("give") && parts.length >= 3 && npcs.containsKey(parts[1])) {
+            event.setCancelled(true);
+            handleGive(parts, "Console");
+        } else if (cmd.equals("kill") && parts.length == 2 && npcs.containsKey(parts[1])) {
+            event.setCancelled(true);
+            String robloxName = parts[1];
+            new BukkitRunnable() {
+                @Override public void run() { PlayerUpdate.despawnNPC(robloxName); }
+            }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
+            Bukkit.getLogger().info("[RB] Removed Roblox player " + robloxName);
+        } else if (cmd.equals("tp") && parts.length == 2 && npcs.containsKey(parts[1])) {
+            // /tp <robloxname> from console doesn't make sense (no sender position), skip
+        }
+    }
+
+    private void handleGive(String[] parts, String senderName) {
+        String robloxName = parts[1];
+        NPC npc = npcs.get(robloxName);
+        if (npc == null || !npc.isSpawned() || !(npc.getEntity() instanceof Player npcPlayer)) return;
+
+        Material material = Material.matchMaterial(parts[2]);
+        if (material == null) {
+            Bukkit.getLogger().warning("[RB] /give: unknown material '" + parts[2] + "'");
+            return;
+        }
+        int count = 1;
+        if (parts.length >= 4) {
+            try { count = Math.min(Math.max(Integer.parseInt(parts[3]), 1), 64); }
+            catch (NumberFormatException ignored) {}
+        }
+        final int finalCount = count;
+        new BukkitRunnable() {
+            @Override public void run() {
+                npcPlayer.getInventory().addItem(new ItemStack(material, finalCount));
+                Bukkit.getLogger().info("[RB] Gave " + finalCount + "x " + material.name() + " to Roblox player " + robloxName);
+            }
+        }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -171,14 +231,12 @@ public class NPCHandler implements Listener {
             NPC npc = CitizensAPI.getNPCRegistry().createNPC(EntityType.PLAYER, user);
             SkinTrait skinTrait = npc.getOrAddTrait(SkinTrait.class);
             skinTrait.setSkinName(user, true);
-            // Gravity stays at default (true) so the NPC stands on terrain.
             npc.spawn(targetLocation);
             npcs.put(user, npc);
 
             // Citizens removes the NPC from the client tab list right after spawning.
-            // Wait 2 ticks for Citizens to finish, then re-inject ADD_PLAYER so this
-            // Roblox player appears in the TAB list exactly like a real Java player —
-            // mirroring the mechanism used by Floodgate/Geyser.
+            // Wait 2 ticks for Citizens to finish, then re-inject ADD_PLAYER — same
+            // mechanism as Floodgate/Geyser — and install the Geyser-style packet interceptor.
             new BukkitRunnable() {
                 @Override
                 public void run() {
@@ -186,13 +244,14 @@ public class NPCHandler implements Listener {
                     UUID uuid = npcPlayer.getUniqueId();
                     npcUUIDs.put(user, uuid);
                     PacketUtils.addToTabList(npcPlayer, Bukkit.getOnlinePlayers());
+                    PacketInterceptor.inject(user, npcPlayer);
                 }
             }.runTaskLater(JavaPlugin.getPlugin(CrossplayPackage.class), 2L);
 
             Bukkit.broadcastMessage("§f§7[RB]§e " + user + " joined the game");
         }
 
-        private void despawnNPC(String user) {
+        static void despawnNPC(String user) {
             NPC npc = npcs.get(user);
             if (npc == null) return;
 
@@ -201,7 +260,11 @@ public class NPCHandler implements Listener {
                 currentTasks.remove(user);
             }
 
-            // Capture UUID before the entity is removed from the world
+            // Remove packet interceptor before despawning
+            if (npc.isSpawned() && npc.getEntity() instanceof Player npcPlayer) {
+                PacketInterceptor.remove(user, npcPlayer);
+            }
+
             UUID uuid = npcUUIDs.remove(user);
             if (npc.isSpawned()) npc.despawn();
             npcs.remove(user);

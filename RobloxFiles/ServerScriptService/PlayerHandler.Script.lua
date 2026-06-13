@@ -1,233 +1,206 @@
-local HttpService = game:GetService("HttpService")
+-- Renders Minecraft players as 3D models in Roblox.
+-- HTTP polling (100 req/min) updates live state; RunService.Heartbeat drives
+-- limb animation at ~60 fps so walking looks smooth between polls.
+local HttpService       = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local TweenService = game:GetService("TweenService")
-local ChatService = game:GetService("Chat")
-local RunService = game:GetService("RunService")
+local Workspace         = game:GetService("Workspace")
+local TweenService      = game:GetService("TweenService")
+local ChatService       = game:GetService("Chat")
+local RunService        = game:GetService("RunService")
 
 local playerModelTemplate = ReplicatedStorage:WaitForChild("Player")
-local players = {}
-local playerModels = {}
+local updateInterval      = 60 / 100
+local dataUrl             = "http://" .. ReplicatedStorage.IP.Value .. "/players"
+
+if not Workspace:FindFirstChild("Players") then
+	local f = Instance.new("Folder"); f.Name = "Players"; f.Parent = Workspace
+end
+
+-- ── State ─────────────────────────────────────────────────────────────────────
+
+local playerModels   = {}  -- uuid → Model
 local usernameToUUID = {}
 local uuidToUsername = {}
-local playerPrevPos = {}   -- tracks last position for walk detection
-local playerWalkTime = {}  -- per-player walk cycle time accumulator
 
--- Auto-create Players folder if missing
-if not Workspace:FindFirstChild("Players") then
-	local folder = Instance.new("Folder")
-	folder.Name = "Players"
-	folder.Parent = Workspace
-end
+-- Live state written by the HTTP poll, read by Heartbeat.
+local playerState = {}
 
-local updateInterval = 60 / 100
-local dataUrl = "http://" .. ReplicatedStorage.IP.Value .. "/players"
+-- ── Limb animation at ~60 fps ─────────────────────────────────────────────────
 
--- Animate a Minecraft player model's limbs.
--- Assumes standard Minecraft rig part names: Left Arm, Right Arm, Left Leg, Right Leg, Torso.
--- Offsets are based on blockSize=3; a Minecraft player is ~1.8 blocks tall = 5.4 studs.
-local function animatePlayerLimbs(playerModel, position, yawDeg, isMoving, dt, isAttacking)
-	local uuid = playerModel.Name
-	playerWalkTime[uuid] = (playerWalkTime[uuid] or 0) + (isMoving and dt * 8 or 0)
-	local t = playerWalkTime[uuid]
+local LIMB_TWEEN = TweenInfo.new(0.08, Enum.EasingStyle.Linear)
 
-	-- When attacking, override the right-arm swing with a punch animation
-	local attackSwing = isAttacking and math.rad(-75) or 0
-	local swing = isMoving and math.sin(t) * math.rad(35) or 0
-	local yawRad = math.rad(-yawDeg)
+local function animateLimbs(uuid, dt)
+	local model = playerModels[uuid]
+	local state = playerState[uuid]
+	if not model or not state then return end
+
+	if state.isMoving then
+		state.walkTime = state.walkTime + dt * 8
+	else
+		state.walkTime = state.walkTime * 0.7  -- damp to rest
+	end
+	local t = state.walkTime
+
+	local swing   = math.sin(t) * math.rad(35)
+	local yawRad  = math.rad(-state.yaw)
 	local bodyRot = CFrame.Angles(0, yawRad, 0)
+	local tPos    = state.position + Vector3.new(0, 1, 0)
 
-	local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Linear)
-
-	local torsoPos = position + Vector3.new(0, 1, 0)
-
-	-- Right Arm: punch forward when attacking, otherwise normal walk swing
-	local rightArm = playerModel:FindFirstChild("Right Arm")
+	local rightArm = model:FindFirstChild("Right Arm")
 	if rightArm then
-		local offset = bodyRot * Vector3.new(1.25, 0.25, 0)
-		local armPos = torsoPos + offset
-		local rightSwing = isAttacking and attackSwing or -swing
-		local armCF = CFrame.new(armPos) * bodyRot * CFrame.Angles(rightSwing, 0, 0) * CFrame.new(0, -0.75, 0)
-		TweenService:Create(rightArm, tweenInfo, {CFrame = armCF}):Play()
+		local rs = state.isAttacking and math.rad(-75) or -swing
+		TweenService:Create(rightArm, LIMB_TWEEN, {
+			CFrame = CFrame.new(tPos + bodyRot * Vector3.new(1.25, 0.25, 0))
+				* bodyRot * CFrame.Angles(rs, 0, 0) * CFrame.new(0, -0.75, 0)
+		}):Play()
 	end
 
-	-- Left Arm: normal walk swing (unaffected by attack)
-	local leftArm = playerModel:FindFirstChild("Left Arm")
+	local leftArm = model:FindFirstChild("Left Arm")
 	if leftArm then
-		local offset = bodyRot * Vector3.new(-1.25, 0.25, 0)
-		local armPos = torsoPos + offset
-		local armCF = CFrame.new(armPos) * bodyRot * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -0.75, 0)
-		TweenService:Create(leftArm, tweenInfo, {CFrame = armCF}):Play()
+		TweenService:Create(leftArm, LIMB_TWEEN, {
+			CFrame = CFrame.new(tPos + bodyRot * Vector3.new(-1.25, 0.25, 0))
+				* bodyRot * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -0.75, 0)
+		}):Play()
 	end
 
-	-- Right Leg: offset right, opposite to right arm
-	local rightLeg = playerModel:FindFirstChild("Right Leg")
+	local rightLeg = model:FindFirstChild("Right Leg")
 	if rightLeg then
-		local offset = bodyRot * Vector3.new(0.45, -0.85, 0)
-		local legPos = torsoPos + offset
-		local legCF = CFrame.new(legPos) * bodyRot * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -0.75, 0)
-		TweenService:Create(rightLeg, tweenInfo, {CFrame = legCF}):Play()
+		TweenService:Create(rightLeg, LIMB_TWEEN, {
+			CFrame = CFrame.new(tPos + bodyRot * Vector3.new(0.45, -0.85, 0))
+				* bodyRot * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -0.75, 0)
+		}):Play()
 	end
 
-	-- Left Leg: offset left, opposite to left arm
-	local leftLeg = playerModel:FindFirstChild("Left Leg")
+	local leftLeg = model:FindFirstChild("Left Leg")
 	if leftLeg then
-		local offset = bodyRot * Vector3.new(-0.45, -0.85, 0)
-		local legPos = torsoPos + offset
-		local legCF = CFrame.new(legPos) * bodyRot * CFrame.Angles(-swing, 0, 0) * CFrame.new(0, -0.75, 0)
-		TweenService:Create(leftLeg, tweenInfo, {CFrame = legCF}):Play()
+		TweenService:Create(leftLeg, LIMB_TWEEN, {
+			CFrame = CFrame.new(tPos + bodyRot * Vector3.new(-0.45, -0.85, 0))
+				* bodyRot * CFrame.Angles(-swing, 0, 0) * CFrame.new(0, -0.75, 0)
+		}):Play()
 	end
 end
 
-local lastUpdateTime = tick()
+RunService.Heartbeat:Connect(function(dt)
+	for uuid in pairs(playerState) do
+		animateLimbs(uuid, dt)
+	end
+end)
+
+-- ── HTTP poll ─────────────────────────────────────────────────────────────────
+
+local BODY_TWEEN = TweenInfo.new(0.5, Enum.EasingStyle.Linear)
 
 local function handleRequest()
-	local now = tick()
-	local dt = now - lastUpdateTime
-	lastUpdateTime = now
+	local ok, raw = pcall(function() return HttpService:GetAsync(dataUrl) end)
+	if not ok then warn("PlayerHandler: /players failed:", raw) return end
 
-	local success, pdata = pcall(function()
-		return HttpService:GetAsync(dataUrl)
-	end)
+	local data = HttpService:JSONDecode(raw)
+	local seen = {}
 
-	if not success then
-		warn("Failed to fetch player data:", pdata)
-		return
-	end
+	for _, d in ipairs(data) do
+		local uuid = d.uuid
+		if not uuid or not d.name then continue end
+		seen[uuid] = true
 
-	local playerData = HttpService:JSONDecode(pdata)
-	local currentPlayers = {}
-
-	for _, data in ipairs(playerData) do
-		local uuid = data["uuid"]
-		if not uuid or not data.name then continue end
-		currentPlayers[uuid] = true
-
-		if not players[uuid] then
-			local newPlayerModel = playerModelTemplate:Clone()
-			newPlayerModel.Name = uuid
-			newPlayerModel.Parent = Workspace:FindFirstChild("Players") or Workspace
-
-			local username = data.name
+		if not playerModels[uuid] then
+			local model    = playerModelTemplate:Clone()
+			model.Name     = uuid
+			model.Parent   = Workspace.Players
+			local username = d.name
 			usernameToUUID[username] = uuid
-			uuidToUsername[uuid] = username
+			uuidToUsername[uuid]     = username
 
-			local nameLabel = Instance.new("BillboardGui")
-			nameLabel.Name = "PlayerNameLabel"
-			nameLabel.Size = UDim2.new(0, 100, 0, 20)
-			nameLabel.StudsOffset = Vector3.new(0, 1.2, 0)
-			nameLabel.Adornee = newPlayerModel:FindFirstChild("Head")
-			nameLabel.AlwaysOnTop = false
-			nameLabel.MaxDistance = 50
+			local billboard = Instance.new("BillboardGui")
+			billboard.Name          = "PlayerNameLabel"
+			billboard.Size          = UDim2.new(0, 100, 0, 20)
+			billboard.StudsOffset   = Vector3.new(0, 1.2, 0)
+			billboard.Adornee       = model:FindFirstChild("Head")
+			billboard.AlwaysOnTop   = false
+			billboard.MaxDistance   = 50
+			billboard.Parent        = model
 
 			local nameText = Instance.new("TextLabel")
-			nameText.Parent = nameLabel
-			nameText.Size = UDim2.new(1, 0, 1, 0)
-			nameText.Text = username
-			nameText.TextColor3 = Color3.new(1, 1, 1)
+			nameText.Size                   = UDim2.new(1, 0, 1, 0)
+			nameText.Text                   = username
+			nameText.TextColor3             = Color3.new(1, 1, 1)
 			nameText.BackgroundTransparency = 0.6
-			nameText.BackgroundColor3 = Color3.fromRGB(128, 128, 128)
-			nameText.BorderSizePixel = 0
-			nameText.FontFace = Font.fromId(12187371840)
-			nameText.TextScaled = true
-			nameLabel.Parent = newPlayerModel
+			nameText.BackgroundColor3       = Color3.fromRGB(128, 128, 128)
+			nameText.BorderSizePixel        = 0
+			nameText.FontFace               = Font.fromId(12187371840)
+			nameText.TextScaled             = true
+			nameText.Parent                 = billboard
 
-			game.ReplicatedStorage.loadPlayerSkin:FireAllClients(uuid, username, newPlayerModel)
+			ReplicatedStorage.loadPlayerSkin:FireAllClients(uuid, username, model)
 
-			players[uuid] = true
-			playerModels[uuid] = newPlayerModel
+			playerModels[uuid] = model
+			playerState[uuid]  = {
+				position  = Vector3.new(0, 0, 0), yaw = 0, pitch = 0,
+				isMoving  = false, isAttacking = false, isCrouching = false,
+				walkTime  = 0,
+			}
 		end
 
-		local playerModel = playerModels[uuid]
-		local isCrouching = data.crouch == true
+		local isCrouching = d.crouch == true
+		local position    = Vector3.new(
+			(d.x * 3) - 1.5,
+			(d.y * 3) + 0.3 + (isCrouching and -1.125 or 0),
+			(d.z * 3) - 1.5
+		)
+		local yaw = (d.yaw or 0) + 180
 
-		-- When sneaking, Minecraft shifts the player down by 0.375 blocks (1.125 studs) and leans forward
-		local crouchYOffset = isCrouching and -1.125 or 0
-		local crouchForwardTilt = isCrouching and math.rad(20) or 0
+		local state       = playerState[uuid]
+		state.isMoving    = (position - state.position).Magnitude > 0.05
+		state.position    = position
+		state.yaw         = yaw
+		state.pitch       = d.pitch or 0
+		state.isAttacking = d.isAttacking == true
+		state.isCrouching = isCrouching
 
-		local position = Vector3.new((data.x * 3) - 1.5, (data.y * 3) + 0.3 + crouchYOffset, (data.z * 3) - 1.5)
-		local yaw = data.yaw + 180
-		local pitch = data.pitch
+		local model      = playerModels[uuid]
+		local crouchTilt = isCrouching and math.rad(20) or 0
+		local yawRad     = math.rad(-yaw)
 
-		-- Detect movement for walk animation
-		local prevPos = playerPrevPos[uuid]
-		local isMoving = prevPos ~= nil and (position - prevPos).Magnitude > 0.05
-		playerPrevPos[uuid] = position
+		TweenService:Create(model.PrimaryPart, BODY_TWEEN, { CFrame = CFrame.new(position) }):Play()
 
-		local tweenInfo = TweenInfo.new(0.5, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
-
-		-- Move body root
-		TweenService:Create(playerModel.PrimaryPart, tweenInfo, {CFrame = CFrame.new(position)}):Play()
-
-		-- Head: looks in the direction the player is facing + pitch; counteract torso tilt when crouching
-		local headPart = playerModel:FindFirstChild("Head")
-		local neckPart = headPart and headPart:FindFirstChild("Neck")
-		if headPart then
-			local headPos = position + Vector3.new(0, 2, 0)
-			local headCF = CFrame.new(headPos)
-				* CFrame.Angles(0, math.rad(-yaw), 0)
-				* CFrame.Angles(math.rad(-pitch) - crouchForwardTilt, 0, 0)
-			TweenService:Create(headPart, tweenInfo, {CFrame = headCF}):Play()
-			if neckPart then
-				TweenService:Create(neckPart, tweenInfo, {CFrame = headCF}):Play()
-			end
+		local head = model:FindFirstChild("Head")
+		if head then
+			TweenService:Create(head, BODY_TWEEN, {
+				CFrame = CFrame.new(position + Vector3.new(0, 2, 0))
+					* CFrame.Angles(0, yawRad, 0)
+					* CFrame.Angles(math.rad(-(d.pitch or 0)) - crouchTilt, 0, 0)
+			}):Play()
 		end
 
-		-- Torso: rotates with yaw and leans forward when crouching
-		local torsoPart = playerModel:FindFirstChild("Torso")
-		if torsoPart then
-			local torsoCF = CFrame.new(position + Vector3.new(0, 1, 0))
-				* CFrame.Angles(0, math.rad(-yaw), 0)
-				* CFrame.Angles(crouchForwardTilt, 0, 0)
-			TweenService:Create(torsoPart, tweenInfo, {CFrame = torsoCF}):Play()
+		local torso = model:FindFirstChild("Torso")
+		if torso then
+			TweenService:Create(torso, BODY_TWEEN, {
+				CFrame = CFrame.new(position + Vector3.new(0, 1, 0))
+					* CFrame.Angles(0, yawRad, 0)
+					* CFrame.Angles(crouchTilt, 0, 0)
+			}):Play()
 		end
-
-		-- Limb animations
-		animatePlayerLimbs(playerModel, position, yaw, isMoving, dt, data.isAttacking == true)
 	end
 
-	-- Collect disconnected UUIDs first, then remove them.
-	-- Modifying a table inside pairs() can cause Lua's next() to skip entries.
+	-- Remove disconnected players
 	local toRemove = {}
-	for uuid in pairs(players) do
-		if not currentPlayers[uuid] then
-			toRemove[#toRemove + 1] = uuid
-		end
+	for uuid in pairs(playerModels) do
+		if not seen[uuid] then toRemove[#toRemove + 1] = uuid end
 	end
 	for _, uuid in ipairs(toRemove) do
-		local playerModel = playerModels[uuid]
-		if playerModel then
-			playerModel:Destroy()
-			playerModels[uuid] = nil
-		end
-		players[uuid] = nil
-		playerPrevPos[uuid] = nil
-		playerWalkTime[uuid] = nil
-
+		if playerModels[uuid] then playerModels[uuid]:Destroy() end
+		playerModels[uuid] = nil
+		playerState[uuid]  = nil
 		local username = uuidToUsername[uuid]
-		if username then
-			usernameToUUID[username] = nil
-			uuidToUsername[uuid] = nil
-		end
+		if username then usernameToUUID[username] = nil end
+		uuidToUsername[uuid] = nil
 	end
 end
 
-local function CreateChatBubble(instance, message)
-	ChatService:Chat(instance, message, Enum.ChatColor.White)
-end
-
-game.ReplicatedStorage.Chat.OnServerEvent:Connect(function(player, message, sender)
+-- Chat bubbles from MC players
+ReplicatedStorage.Chat.OnServerEvent:Connect(function(_, message, sender)
 	local uuid = usernameToUUID[sender]
-	if uuid then
-		local playerModel = playerModels[uuid]
-		if playerModel then
-			CreateChatBubble(playerModel.Head, message)
-		else
-			warn("Player model not found for chat message:", sender)
-		end
-	else
-		warn("UUID not found for username:", sender)
+	if uuid and playerModels[uuid] then
+		ChatService:Chat(playerModels[uuid].Head, message, Enum.ChatColor.White)
 	end
 end)
 

@@ -170,6 +170,15 @@ public class EntityHandler implements Listener {
             }
         });
 
+        // Geyser-style event relay: drains intercepted packets (title, actionbar, sound, health)
+        // queued by PacketInterceptor for this Roblox player's NPC.
+        spark.get("/events/:username", (req, res) -> {
+            res.type("application/json");
+            String username = req.params(":username");
+            List<PacketInterceptor.RobloxEvent> events = PacketInterceptor.drain(username);
+            return gson.toJson(events);
+        });
+
         // Skin proxy: fetches the Minecraft skin PNG from Crafatar and caches it.
         // Roblox requests from this endpoint so it never has to reach an external HTTPS server.
         spark.get("/skin/:uuid", (req, res) -> {

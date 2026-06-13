@@ -117,6 +117,13 @@
           <artifactId>slf4j-nop</artifactId>
           <version>1.7.36</version>
       </dependency>
+      <!-- Netty is bundled inside the Paper server JAR at runtime; provided here for compilation only -->
+      <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-all</artifactId>
+          <version>4.1.107.Final</version>
+          <scope>provided</scope>
+      </dependency>
       <dependency>
           <groupId>net.citizensnpcs</groupId>
           <artifactId>citizens-main</artifactId>

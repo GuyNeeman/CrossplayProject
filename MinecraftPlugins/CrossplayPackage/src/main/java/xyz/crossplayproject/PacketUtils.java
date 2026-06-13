@@ -62,7 +62,7 @@ public class PacketUtils {
 
     // --- Helpers ---
 
-    private static void broadcast(Object packet, Collection<? extends Player> viewers) {
+    static void broadcast(Object packet, Collection<? extends Player> viewers) {
         for (Player viewer : viewers) {
             try {
                 sendPacket(viewer, packet);
@@ -72,7 +72,7 @@ public class PacketUtils {
         }
     }
 
-    private static void sendPacket(Player player, Object packet) throws Exception {
+    static void sendPacket(Player player, Object packet) throws Exception {
         Object nmsPlayer = getHandle(player);
         Field connField = findField(nmsPlayer.getClass(), "connection");
         Object connection = connField.get(nmsPlayer);
@@ -88,12 +88,12 @@ public class PacketUtils {
         }
     }
 
-    private static Object getHandle(Player player) throws Exception {
+    static Object getHandle(Player player) throws Exception {
         return player.getClass().getMethod("getHandle").invoke(player);
     }
 
     /** Walks the class hierarchy so we find the field even if it's declared in a superclass. */
-    private static Field findField(Class<?> cls, String name) throws NoSuchFieldException {
+    static Field findField(Class<?> cls, String name) throws NoSuchFieldException {
         while (cls != null) {
             try {
                 Field f = cls.getDeclaredField(name);
