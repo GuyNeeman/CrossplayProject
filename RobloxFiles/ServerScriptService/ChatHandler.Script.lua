@@ -1,6 +1,9 @@
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local serverUrl = "http://" .. game.ReplicatedStorage.IP.Value .. "/chat"
+local baseUrl = "http://" .. ReplicatedStorage.IP.Value
+local serverUrl = baseUrl .. "/chat"
+local commandUrl = baseUrl .. "/command"
 local updateInterval = 60 / 100 -- 100 requests per minute
 
 local NAME_COLORS = {
@@ -81,13 +84,27 @@ local function mainLoop()
 	while true do
 		local messages = fetchMessages()
 		displayMessages(messages)
-		wait(updateInterval)
+		task.wait(updateInterval)
+	end
+end
+
+local function sendCommand(command)
+	local data = HttpService:JSONEncode({ command = command })
+	local success, response = pcall(function()
+		return HttpService:PostAsync(commandUrl, data, Enum.HttpContentType.ApplicationJson, false)
+	end)
+	if not success then
+		warn("Failed to send command:", response)
 	end
 end
 
 game.Players.PlayerAdded:Connect(function(player)
 	player.Chatted:Connect(function(message)
-		onChat(player.DisplayName, player.Name, message)
+		if string.sub(message, 1, 1) == "/" then
+			sendCommand(message)
+		else
+			onChat(player.DisplayName, player.Name, message)
+		end
 	end)
 end)
 

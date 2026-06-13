@@ -4,6 +4,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.server.ServerCommandEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.json.JSONArray;
@@ -11,12 +12,13 @@ import org.json.JSONObject;
 import spark.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class CrossChat implements Listener {
 
-    private final List<JSONObject> minecraftMessages = new ArrayList<>();
-    private final List<JSONObject> robloxMessages = new ArrayList<>();
+    private final List<JSONObject> minecraftMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<JSONObject> robloxMessages = Collections.synchronizedList(new ArrayList<>());
 
     public void setupRoutes(Service spark) {
         spark.get("/favicon.ico", (req, res) -> "");
@@ -40,12 +42,15 @@ public class CrossChat implements Listener {
 
         spark.get("/chat", (req, res) -> {
             res.type("application/json");
-            JSONArray messagesArray = new JSONArray(minecraftMessages);
-            minecraftMessages.clear();
-            return messagesArray.toString();
+            synchronized (minecraftMessages) {
+                JSONArray messagesArray = new JSONArray(minecraftMessages);
+                minecraftMessages.clear();
+                return messagesArray.toString();
+            }
         });
     }
 
+    @SuppressWarnings("deprecation")
     @EventHandler
     public void onPlayerChat(AsyncPlayerChatEvent event) {
         event.setFormat("%s: %s");
@@ -59,7 +64,6 @@ public class CrossChat implements Listener {
         if (event.getCommand().startsWith("say ")) {
             String playerName = "[SERVER]";
             String message = event.getCommand().substring(4);
-
             sendToRoblox(playerName, message);
         }
     }
@@ -68,8 +72,20 @@ public class CrossChat implements Listener {
         JSONObject jsonMessage = new JSONObject();
         jsonMessage.put("sender", playerName);
         jsonMessage.put("message", message);
-
         minecraftMessages.add(jsonMessage);
+    }
+
+    @EventHandler
+    public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
+        String cmd = event.getMessage().toLowerCase().trim();
+        if (cmd.equals("/list") || cmd.startsWith("/list ")) {
+            java.util.Set<String> robloxPlayers = NPCHandler.getConnectedPlayerNames();
+            if (!robloxPlayers.isEmpty()) {
+                event.getPlayer().sendMessage(
+                    "§b[Roblox] §fConnected (" + robloxPlayers.size() + "): §e" + String.join("§f, §e", robloxPlayers)
+                );
+            }
+        }
     }
 
     public void startBroadcastTask() {
@@ -77,13 +93,17 @@ public class CrossChat implements Listener {
     }
 
     private void broadcastMessagesToMinecraft() {
-        for (JSONObject messageObject : robloxMessages) {
+        List<JSONObject> snapshot;
+        synchronized (robloxMessages) {
+            snapshot = new ArrayList<>(robloxMessages);
+            robloxMessages.clear();
+        }
+        for (JSONObject messageObject : snapshot) {
             String sender = messageObject.getString("sender");
             String message = messageObject.getString("message");
             String colorHex = messageObject.optString("color", "FFFFFF");
             String formattedMessage = net.md_5.bungee.api.ChatColor.of(colorHex) + sender + net.md_5.bungee.api.ChatColor.RESET + ": " + message;
             Bukkit.getServer().broadcastMessage("§f§7[RB]§f " + formattedMessage);
         }
-        robloxMessages.clear();
     }
 }

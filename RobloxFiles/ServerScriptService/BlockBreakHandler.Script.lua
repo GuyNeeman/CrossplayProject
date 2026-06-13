@@ -8,12 +8,12 @@ remoteEvent.Name = "BlockBrokenEvent"
 remoteEvent.Parent = ReplicatedStorage
 
 local function onBlockInteraction(player, blockPosition)
-	local key = string.format("%d,%d,%d", blockPosition.X / 3, blockPosition.Y / 3, blockPosition.Z / 3)
+	local key = string.format("%d,%d,%d", math.round(blockPosition.X / 3), math.round(blockPosition.Y / 3), math.round(blockPosition.Z / 3))
 	local block = currentBlocks[key]
 
 	if block then
 		block:Destroy()
-		--currentBlocks[key] = nil
+		currentBlocks[key] = nil
 
 		local data = {
 			x = blockPosition.X / 3,

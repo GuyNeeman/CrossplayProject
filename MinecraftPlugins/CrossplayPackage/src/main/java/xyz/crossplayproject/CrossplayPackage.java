@@ -18,6 +18,7 @@ public class CrossplayPackage extends JavaPlugin {
     private POSTHandler postHandler;
     private CrossChat crossChat;
     private NPCHandler npcHandler;
+    private CommandHandler commandHandler;
     private Service sparkService;
     private int sparkPort;
 
@@ -40,14 +41,16 @@ public class CrossplayPackage extends JavaPlugin {
         postHandler = new POSTHandler();
         crossChat = new CrossChat();
         npcHandler = new NPCHandler();
+        commandHandler = new CommandHandler();
 
         setupSpark();
         crossChat.startBroadcastTask();
 
         getServer().getPluginManager().registerEvents(crossChat, this);
+        getServer().getPluginManager().registerEvents(npcHandler, this);
+        getServer().getPluginManager().registerEvents(entityHandler, this); // also handles BlockDamageEvent
 
         getLogger().info("CrossplayPackage has been enabled!");
-
     }
 
     private Set<Material> loadMaterials(List<String> materialNames) {
@@ -72,6 +75,7 @@ public class CrossplayPackage extends JavaPlugin {
         entityHandler.setupRoutes(sparkService);
         postHandler.setupRoutes(sparkService);
         crossChat.setupRoutes(sparkService);
+        commandHandler.setupRoutes(sparkService);
 
         if (!Bukkit.getPluginManager().isPluginEnabled("Citizens")) {
             getLogger().warning("Citizens plugin is not installed or enabled. NPCHandler disabled.");
@@ -81,9 +85,9 @@ public class CrossplayPackage extends JavaPlugin {
         }
     }
 
-
     @Override
     public void onDisable() {
+        npcHandler.cleanup();
 
         if (sparkService != null) {
             sparkService.stop();
