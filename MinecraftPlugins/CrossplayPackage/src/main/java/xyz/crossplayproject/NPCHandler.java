@@ -20,11 +20,13 @@ import spark.Request;
 import spark.Response;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 
 public class NPCHandler implements Listener {
 
-    private static final Map<String, NPC> npcs = new HashMap<>();
+    // ConcurrentHashMap: getNPC() and getConnectedPlayerNames() are called from Spark threads.
+    private static final Map<String, NPC> npcs = new ConcurrentHashMap<>();
     private static final Map<String, BukkitRunnable> currentTasks = new HashMap<>();
     /** Stores each NPC's Bukkit entity UUID so we can remove it from the tab list after despawn. */
     private static final Map<String, UUID> npcUUIDs = new HashMap<>();

@@ -48,7 +48,10 @@ public class CrossplayPackage extends JavaPlugin {
 
         getServer().getPluginManager().registerEvents(crossChat, this);
         getServer().getPluginManager().registerEvents(npcHandler, this);
-        getServer().getPluginManager().registerEvents(entityHandler, this); // also handles BlockDamageEvent
+        getServer().getPluginManager().registerEvents(entityHandler, this);
+        // Keep /players, /mobs, /world, /spawn snapshots fresh on the main thread so
+        // Spark handler threads never touch Bukkit API directly.
+        getServer().getScheduler().runTaskTimer(this, entityHandler::refreshSnapshots, 0L, 2L);
 
         getLogger().info("CrossplayPackage has been enabled!");
     }

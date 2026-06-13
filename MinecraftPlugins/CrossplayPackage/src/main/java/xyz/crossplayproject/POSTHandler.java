@@ -114,16 +114,14 @@ public class POSTHandler {
 
                 world.playEffect(block.getLocation(), Effect.STEP_SOUND, block.getType());
 
-                // Calculate natural drops and route them to the Roblox player's NPC inventory.
-                // The POST body carries the "player" field set by NPCHandler.Script.lua.
-                // We look up the NPC by name; if found we add drops directly to its inventory.
+                // Route natural drops to the nearest Roblox NPC within 32 horizontal blocks.
                 java.util.Collection<ItemStack> drops = block.getDrops();
                 for (NPC npc : getNPCsNearBlock(world, x, y, z, 32)) {
                     if (npc.isSpawned() && npc.getEntity() instanceof Player npcPlayer) {
                         for (ItemStack drop : drops) {
                             npcPlayer.getInventory().addItem(drop.clone());
                         }
-                        break; // give drops to the closest Roblox player only
+                        break; // first match wins; list is not distance-sorted
                     }
                 }
 

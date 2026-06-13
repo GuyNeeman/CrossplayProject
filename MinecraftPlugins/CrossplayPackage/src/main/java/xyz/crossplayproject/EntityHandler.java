@@ -8,27 +8,30 @@ import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.TNTPrimed;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockDamageAbortEvent;
 import org.bukkit.event.block.BlockDamageEvent;
-import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
 import spark.Service;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class EntityHandler implements Listener {
 
     private static final Logger logger = Logger.getLogger(EntityHandler.class.getName());
+    private final Gson gson = new Gson();
     // Skin PNG cache: UUID string → raw PNG bytes (populated on first request per UUID)
     private final ConcurrentHashMap<String, byte[]> skinCache = new ConcurrentHashMap<>();
     // Tracks when each player last landed an attack hit (epoch ms); used for isAttacking flag
@@ -37,6 +40,23 @@ public class EntityHandler implements Listener {
 
     // Tracks blocks currently being mined: player UUID → damage record
     private static final ConcurrentHashMap<UUID, BlockDamageRecord> activeBreaks = new ConcurrentHashMap<>();
+
+    // Thread-safe snapshots of Bukkit world state; refreshed from the main thread every 2 ticks
+    // by CrossplayPackage's runTaskTimer so Spark threads never touch Bukkit API directly.
+    private volatile String playersSnapshot = "[]";
+    private volatile String mobsSnapshot    = "[]";
+    private volatile String worldSnapshot   = "{}";
+    private volatile String spawnSnapshot   = "{}";
+
+    /** Called from the main thread every 2 ticks (see CrossplayPackage). */
+    public void refreshSnapshots() {
+        playersSnapshot = gson.toJson(getPlayerPositions());
+        mobsSnapshot    = gson.toJson(getMobData());
+        worldSnapshot   = gson.toJson(getWorldState());
+        World w = Bukkit.getWorlds().getFirst();
+        Location spawn = w.getSpawnLocation();
+        spawnSnapshot   = gson.toJson(new SpawnLocation(spawn.getX(), spawn.getY(), spawn.getZ()));
+    }
 
     private static class BlockDamageRecord {
         final int x, y, z;
@@ -76,44 +96,37 @@ public class EntityHandler implements Listener {
         activeBreaks.remove(event.getPlayer().getUniqueId());
     }
 
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID uuid = event.getPlayer().getUniqueId();
+        recentAttackers.remove(uuid);
+        activeBreaks.remove(uuid);
+    }
+
     public void setupRoutes(Service spark) {
         spark.get("/favicon.ico", (req, res) -> "");
 
         spark.get("/players", (req, res) -> {
             res.type("application/json");
-
-            List<PlayerPosition> playerPositions = getPlayerPositions();
-            Gson gson = new Gson();
-            return gson.toJson(playerPositions);
+            return playersSnapshot;
         });
 
         spark.get("/mobs", (req, res) -> {
             res.type("application/json");
-
-            List<MobPosition> mobDataList = getMobData();
-            Gson gson = new Gson();
-            return gson.toJson(mobDataList);
+            return mobsSnapshot;
         });
 
         spark.get("/world", (req, res) -> {
             res.type("application/json");
-
-            WorldState worldState = getWorldState();
-            Gson gson = new Gson();
-            return gson.toJson(worldState);
+            return worldSnapshot;
         });
 
         spark.get("/spawn", (req, res) -> {
             res.type("application/json");
-
-            Gson gson = new Gson();
-            org.bukkit.World world = Bukkit.getWorlds().getFirst();
-            org.bukkit.Location spawn = world.getSpawnLocation();
-            SpawnLocation spawnLocation = new SpawnLocation(spawn.getX(), spawn.getY(), spawn.getZ());
-            return gson.toJson(spawnLocation);
+            return spawnSnapshot;
         });
 
-        // Returns blocks currently being mined by Minecraft players with their crack stage (0-9).
+        // /blockdamage reads only ConcurrentHashMap entries populated by event handlers — safe from any thread.
         spark.get("/blockdamage", (req, res) -> {
             res.type("application/json");
             long now = System.currentTimeMillis();
@@ -125,27 +138,36 @@ public class EntityHandler implements Listener {
                 int stage = (int) Math.min(9, Math.floor(elapsedSec / breakTimeSec * 10));
                 list.add(new BlockDamageInfo(rec.x, rec.y, rec.z, stage));
             }
-            return new Gson().toJson(list);
+            return gson.toJson(list);
         });
 
-        // Returns the inventory of a Roblox player's NPC (36 main slots + 4 armor slots).
+        // Inventory must be read on the main thread; callSyncMethod bridges Spark → Bukkit safely.
         spark.get("/inventory/:username", (req, res) -> {
             res.type("application/json");
             String username = req.params(":username");
-            NPC npc = NPCHandler.getNPC(username);
-            if (npc == null || !npc.isSpawned() || !(npc.getEntity() instanceof org.bukkit.entity.Player npcPlayer)) {
-                res.status(404);
+            try {
+                List<InventorySlot> slots = Bukkit.getScheduler()
+                        .callSyncMethod(JavaPlugin.getPlugin(CrossplayPackage.class), () -> {
+                            NPC npc = NPCHandler.getNPC(username);
+                            if (npc == null || !npc.isSpawned()
+                                    || !(npc.getEntity() instanceof org.bukkit.entity.Player npcPlayer)) {
+                                return List.<InventorySlot>of();
+                            }
+                            List<InventorySlot> result = new ArrayList<>();
+                            ItemStack[] contents = npcPlayer.getInventory().getContents();
+                            for (int i = 0; i < contents.length; i++) {
+                                ItemStack item = contents[i];
+                                if (item != null && item.getType() != Material.AIR) {
+                                    result.add(new InventorySlot(i, item.getType().name(), item.getAmount()));
+                                }
+                            }
+                            return result;
+                        }).get(5, TimeUnit.SECONDS);
+                return gson.toJson(slots);
+            } catch (Exception e) {
+                logger.log(Level.WARNING, "[Crossplay] Failed to read inventory for " + username, e);
                 return "[]";
             }
-            List<InventorySlot> slots = new ArrayList<>();
-            ItemStack[] contents = npcPlayer.getInventory().getContents();
-            for (int i = 0; i < contents.length; i++) {
-                ItemStack item = contents[i];
-                if (item != null && item.getType() != Material.AIR) {
-                    slots.add(new InventorySlot(i, item.getType().name(), item.getAmount()));
-                }
-            }
-            return new Gson().toJson(slots);
         });
 
         // Skin proxy: fetches the Minecraft skin PNG from Crafatar and caches it.
@@ -224,7 +246,6 @@ public class EntityHandler implements Listener {
             for (Chunk chunk : world.getLoadedChunks()) {
                 for (Entity entity : chunk.getEntities()) {
                     if (entity instanceof LivingEntity livingEntity && !(entity instanceof org.bukkit.entity.Player)) {
-                        String mobType = livingEntity.getType().name();
                         mobPositions.add(new MobPosition(
                                 livingEntity.getUniqueId().toString(),
                                 livingEntity.getLocation().getX(),
@@ -232,7 +253,7 @@ public class EntityHandler implements Listener {
                                 livingEntity.getLocation().getZ(),
                                 livingEntity.getLocation().getYaw(),
                                 livingEntity.getLocation().getPitch(),
-                                mobType
+                                livingEntity.getType().name()
                         ));
                     } else if (entity instanceof TNTPrimed primedTNT) {
                         Location tntLocation = primedTNT.getLocation();
@@ -254,12 +275,7 @@ public class EntityHandler implements Listener {
 
     private WorldState getWorldState() {
         World world = Bukkit.getServer().getWorlds().getFirst();
-
-        long time = world.getTime();
-        boolean thundering = world.isThundering();
-        boolean raining = world.hasStorm();
-
-        return new WorldState(time, thundering, raining);
+        return new WorldState(world.getTime(), world.isThundering(), world.hasStorm());
     }
 
     private static class PlayerPosition {

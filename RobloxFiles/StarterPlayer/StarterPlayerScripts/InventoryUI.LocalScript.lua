@@ -3,8 +3,6 @@
 -- Items are picked up automatically in Minecraft when the Roblox player breaks blocks.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService") -- not available in LocalScript; uses RemoteFunction
-local StarterGui = game:GetService("StarterGui")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
