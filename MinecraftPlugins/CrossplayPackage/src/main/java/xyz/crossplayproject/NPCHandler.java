@@ -2,28 +2,108 @@ package xyz.crossplayproject;
 
 import com.google.gson.Gson;
 import net.citizensnpcs.api.CitizensAPI;
-import net.citizensnpcs.api.npc.MemoryNPCDataStore;
 import net.citizensnpcs.api.npc.NPC;
-import net.citizensnpcs.trait.Gravity;
 import net.citizensnpcs.trait.SkinTrait;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.util.Vector;
 import spark.Request;
 import spark.Response;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.logging.Level;
 
-public class NPCHandler {
+public class NPCHandler implements Listener {
 
     private static final Map<String, NPC> npcs = new HashMap<>();
     private static final Map<String, BukkitRunnable> currentTasks = new HashMap<>();
+    /** Stores each NPC's Bukkit entity UUID so we can remove it from the tab list after despawn. */
+    private static final Map<String, UUID> npcUUIDs = new HashMap<>();
+
+    public static Set<String> getConnectedPlayerNames() {
+        return Collections.unmodifiableSet(npcs.keySet());
+    }
+
+    public static NPC getNPC(String username) {
+        return npcs.get(username);
+    }
+
+    // ── Event Handlers ────────────────────────────────────────────────────────
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        // Send tab-list ADD for every online Roblox NPC to the newly joined player.
+        // Delay 5 ticks so the client connection handshake is fully complete.
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                Player joined = event.getPlayer();
+                if (!joined.isOnline()) return;
+                for (NPC npc : npcs.values()) {
+                    if (npc.isSpawned() && npc.getEntity() instanceof Player npcPlayer) {
+                        PacketUtils.addToTabList(npcPlayer, List.of(joined));
+                    }
+                }
+            }
+        }.runTaskLater(JavaPlugin.getPlugin(CrossplayPackage.class), 5L);
+    }
+
+    /**
+     * Intercepts commands so Roblox players can be targeted by name just like real players.
+     *
+     *   /tp &lt;robloxname&gt;           — teleport the sender to the Roblox NPC
+     *   /tp &lt;player&gt; &lt;robloxname&gt;  — teleport &lt;player&gt; to the Roblox NPC
+     */
+    @EventHandler
+    public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
+        String[] parts = event.getMessage().trim().split("\\s+");
+
+        if (parts.length == 2 && parts[0].equalsIgnoreCase("/tp")) {
+            NPC npc = npcs.get(parts[1]);
+            if (npc != null && npc.isSpawned()) {
+                event.setCancelled(true);
+                event.getPlayer().teleport(npc.getEntity().getLocation());
+                event.getPlayer().sendMessage("§7[RB]§f Teleported to Roblox player §e" + parts[1]);
+            }
+        } else if (parts.length == 3 && parts[0].equalsIgnoreCase("/tp")) {
+            NPC npc = npcs.get(parts[2]);
+            if (npc != null && npc.isSpawned()) {
+                event.setCancelled(true);
+                Player target = Bukkit.getPlayer(parts[1]);
+                if (target != null) {
+                    target.teleport(npc.getEntity().getLocation());
+                    event.getPlayer().sendMessage(
+                            "§7[RB]§f Teleported §e" + parts[1] + "§f to Roblox player §e" + parts[2]);
+                } else {
+                    event.getPlayer().sendMessage("§cPlayer §e" + parts[1] + "§c not found.");
+                }
+            }
+        }
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    public void cleanup() {
+        for (BukkitRunnable task : currentTasks.values()) task.cancel();
+        currentTasks.clear();
+
+        for (Map.Entry<String, NPC> entry : npcs.entrySet()) {
+            UUID uuid = npcUUIDs.get(entry.getKey());
+            if (uuid != null) PacketUtils.removeFromTabList(uuid, Bukkit.getOnlinePlayers());
+            if (entry.getValue().isSpawned()) entry.getValue().despawn();
+        }
+        npcs.clear();
+        npcUUIDs.clear();
+    }
 
     public void setupRoutes(spark.Service spark) {
         spark.post("/npc", NPCHandler::handleDataRequest);
@@ -43,18 +123,18 @@ public class NPCHandler {
             Gson gson = new Gson();
             PlayerUpdate player = gson.fromJson(req.body(), PlayerUpdate.class);
             new BukkitRunnable() {
-                public void run() {
-                    player.execute();
-                }
+                public void run() { player.execute(); }
             }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
-
             return "OK";
         } catch (Exception e) {
-            JavaPlugin.getPlugin(CrossplayPackage.class).getLogger().log(Level.SEVERE, "Error in NPCHandler", e);
+            JavaPlugin.getPlugin(CrossplayPackage.class).getLogger()
+                    .log(Level.SEVERE, "Error in NPCHandler", e);
             res.status(500);
             return "Internal Server Error";
         }
     }
+
+    // ── NPC Actions ───────────────────────────────────────────────────────────
 
     static class PlayerUpdate {
         private final String user;
@@ -62,63 +142,82 @@ public class NPCHandler {
         private final float yaw, pitch;
         private final boolean disconnect;
 
-        public PlayerUpdate(String user, double x, double y, double z, float yaw, float pitch, boolean disconnect) {
+        public PlayerUpdate(String user, double x, double y, double z,
+                            float yaw, float pitch, boolean disconnect) {
             this.user = user;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.yaw = yaw;
-            this.pitch = pitch;
+            this.x = x; this.y = y; this.z = z;
+            this.yaw = yaw; this.pitch = pitch;
             this.disconnect = disconnect;
-            
-        }
-        private void spawnNPC(String user, Location targetLocation) {
-            NPC npc = CitizensAPI.createAnonymousNPCRegistry(new MemoryNPCDataStore()).createNPC(EntityType.PLAYER, user);
-            SkinTrait skinTrait = npc.getOrAddTrait(SkinTrait.class);
-            String uniqueId = "44513fe2";
-            String signature = "h4HqPM8t49wNC0vw1I5vrwAHAlMIFBJkISjFGqU3fI5oig2QIpo3NIsQrK93vBsMhLVT+p7l5+BFvm3ZyMi7DfYcswgoVMkKlu+Abn6XPH8TruYoVs6GGw0sJ6xR6mN8TTnL0dPMkNFyoyk5S4P2cKU2KkG69ajHDD5iie/sEm+VrVgAb6iBpaFIhVptlqcca488dKp6y5FvywP+WIOcgcH99tcuOus1GiE8VXzu21+hGRwAa2Gv69uTLJmqzSpk9tS+2wLlYqETXRLDSC/fErBTWGYHh34+rkmXbABlo7jLu1AWgoO4tnwWQ1aIwyb1eoaaOUDuidQWrQsjr2bb7+cSQDHNdP4OXY8dzOiUwRxLBRmBP7cHHZuvxDTiy0PcLbzr+mcX033s83rhKCH4lYgiA+RwJIrCLSn+illWfWbws9me342ScFqd5uSCuiIHVRPB1Zl8O3XQJT4rXtBm7MLxahihZsPsrYRT7bZ+Qqn6XTNodh3yBHpaBQsgCQQmqdsg+xSGM/QfyFPaEqP9b47nmALNqjQXGUagi+TDFg1CUJ1Loc14tzqwwZdUHeyPAomv2ZSiyK7c/25H23Yu8bnnoFNIfiWPQxUXg6ROssDGa1xuFjOpyRiio0yOYZRNYbQYT53BCc5ykjl1gqLK/BHz47zziX7bLQ5F/UUiMxc=";
-            String texture = "ewogICJ0aW1lc3RhbXAiIDogMTY0MDQ5NTY3NTk0NSwKICAicHJvZmlsZUlkIiA6ICIzOWEzOTMzZWE4MjU0OGU3ODQwNzQ1YzBjNGY3MjU2ZCIsCiAgInByb2ZpbGVOYW1lIiA6ICJkZW1pbmVjcmFmdGVybG9sIiwKICAic2lnbmF0dXJlUmVxdWlyZWQiIDogdHJ1ZSwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FmYjFiMzM2MjQwNDk1NjBlMjc2YWEwYTY2M2FiMmI3MDI2Yzk0MzE5NTIwOGFhYmY5NDljODU1MTlkZTJjYTIiCiAgICB9CiAgfQp9";
-            skinTrait.setSkinPersistent(uniqueId, signature, texture);
-
-            Gravity gravityTrait = npc.getOrAddTrait(Gravity.class);
-            gravityTrait.setHasGravity(false);
-
-            npc.spawn(targetLocation);
-            npcs.put(user, npc);
-            Bukkit.broadcastMessage("§f§7[RB]§e " + user + " joined the game");
         }
 
         public void execute() {
-            if (disconnect) {
-                despawnNPC(user);
-                return;
-            }
+            if (disconnect) { despawnNPC(user); return; }
 
             World world = Bukkit.getWorlds().getFirst();
-            if (world == null) {
-                Bukkit.getLogger().warning("World 0 not found!");
-                return;
-            }
+            if (world == null) { Bukkit.getLogger().warning("World 0 not found!"); return; }
 
-            Location targetLocation = new Location(world, x + 0.5, y, z + 0.5, yaw, pitch);
+            Location target = new Location(world, x + 0.5, y, z + 0.5, yaw, pitch);
             NPC npc = npcs.get(user);
             if (npc != null && npc.isSpawned()) {
-                moveNPC(user, npc, targetLocation);
+                moveNPC(user, npc, target);
             } else {
-                spawnNPC(user, targetLocation);
+                spawnNPC(user, target);
             }
+        }
+
+        private void spawnNPC(String user, Location targetLocation) {
+            NPC npc = CitizensAPI.getNPCRegistry().createNPC(EntityType.PLAYER, user);
+            SkinTrait skinTrait = npc.getOrAddTrait(SkinTrait.class);
+            skinTrait.setSkinName(user, true);
+            // Gravity stays at default (true) so the NPC stands on terrain.
+            npc.spawn(targetLocation);
+            npcs.put(user, npc);
+
+            // Citizens removes the NPC from the client tab list right after spawning.
+            // Wait 2 ticks for Citizens to finish, then re-inject ADD_PLAYER so this
+            // Roblox player appears in the TAB list exactly like a real Java player —
+            // mirroring the mechanism used by Floodgate/Geyser.
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    if (!npc.isSpawned() || !(npc.getEntity() instanceof Player npcPlayer)) return;
+                    UUID uuid = npcPlayer.getUniqueId();
+                    npcUUIDs.put(user, uuid);
+                    PacketUtils.addToTabList(npcPlayer, Bukkit.getOnlinePlayers());
+                }
+            }.runTaskLater(JavaPlugin.getPlugin(CrossplayPackage.class), 2L);
+
+            Bukkit.broadcastMessage("§f§7[RB]§e " + user + " joined the game");
+        }
+
+        private void despawnNPC(String user) {
+            NPC npc = npcs.get(user);
+            if (npc == null) return;
+
+            if (currentTasks.containsKey(user)) {
+                currentTasks.get(user).cancel();
+                currentTasks.remove(user);
+            }
+
+            // Capture UUID before the entity is removed from the world
+            UUID uuid = npcUUIDs.remove(user);
+            if (npc.isSpawned()) npc.despawn();
+            npcs.remove(user);
+
+            if (uuid != null) PacketUtils.removeFromTabList(uuid, Bukkit.getOnlinePlayers());
+            Bukkit.broadcastMessage("§f§7[RB]§e " + user + " left the game");
         }
 
         private static final double SPEED = 0.3;
 
         private void moveNPC(String user, NPC npc, Location targetLocation) {
-            if (currentTasks.containsKey(user)) {
-                currentTasks.get(user).cancel();
-            }
+            if (currentTasks.containsKey(user)) currentTasks.get(user).cancel();
 
             Location currentLocation = npc.getEntity().getLocation();
-            Vector direction = targetLocation.toVector().subtract(currentLocation.toVector()).normalize();
             double distance = currentLocation.distance(targetLocation);
+            if (distance < 0.1) return;
+
+            Vector direction = targetLocation.toVector().subtract(currentLocation.toVector()).normalize();
             double ticks = distance / SPEED;
 
             BukkitRunnable task = new BukkitRunnable() {
@@ -132,38 +231,16 @@ public class NPCHandler {
                         currentTasks.remove(user);
                         return;
                     }
-
-                    Vector nextPosition = currentLocation.toVector().add(direction.clone().multiply(SPEED * progress));
-                    Location nextLocation = new Location(
-                            currentLocation.getWorld(),
-                            nextPosition.getX(),
-                            nextPosition.getY(),
-                            nextPosition.getZ(),
-                            targetLocation.getYaw(),
-                            targetLocation.getPitch()
-                    );
-
-                    npc.teleport(nextLocation, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
                     progress += 1;
+                    Vector next = currentLocation.toVector().add(direction.clone().multiply(SPEED * progress));
+                    npc.teleport(new Location(currentLocation.getWorld(),
+                                    next.getX(), next.getY(), next.getZ(),
+                                    targetLocation.getYaw(), targetLocation.getPitch()),
+                            org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
                 }
             };
-
             task.runTaskTimer(JavaPlugin.getPlugin(CrossplayPackage.class), 0L, 1L);
             currentTasks.put(user, task);
-        }
-
-
-        private void despawnNPC(String user) {
-            NPC npc = npcs.get(user);
-            if (npc != null && npc.isSpawned()) {
-                if (currentTasks.containsKey(user)) {
-                    currentTasks.get(user).cancel();
-                    currentTasks.remove(user);
-                }
-                npc.despawn();
-                npcs.remove(user);
-                Bukkit.broadcastMessage("§f§7[RB]§e " + user + " left the game");
-            }
         }
     }
 }
