@@ -92,10 +92,10 @@ public class CrossplayPackage extends JavaPlugin {
                     if (session == null || !session.isConnected()) {
                         RobloxSessionManager.connect(update.user);
                         // Session connecting — movement will start flowing on next poll
-                    } else if (session.isActive()) {
-                        // Use server-side Bukkit teleport so Paper's movement validator can't
-                        // reject the position (it would rubber-band a client-side move packet
-                        // when the bot spawns at world spawn and needs to jump 100+ blocks).
+                    } else if (session.isConnected()) {
+                        // Use isConnected() rather than isActive() so the teleport fires even
+                        // while spawned=false (e.g. briefly after a death/respawn cycle).
+                        // Bukkit.getPlayer() returning null safely guards the not-yet-in-game case.
                         final double tx = update.x + 0.5, ty = update.y, tz = update.z + 0.5;
                         final float tyaw = update.yaw, tpitch = update.pitch;
                         new BukkitRunnable() {
