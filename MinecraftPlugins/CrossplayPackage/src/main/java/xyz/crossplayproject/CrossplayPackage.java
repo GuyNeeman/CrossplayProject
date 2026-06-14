@@ -79,6 +79,21 @@ public class CrossplayPackage extends JavaPlugin {
         crossChat.setupRoutes(sparkService);
         commandHandler.setupRoutes(sparkService);
 
+        // /respawn: Roblox death-screen "Respawn" button clicked → bot sends RESPAWN to MC
+        sparkService.post("/respawn", (req, res) -> {
+            try {
+                com.google.gson.JsonObject json = new com.google.gson.Gson()
+                        .fromJson(req.body(), com.google.gson.JsonObject.class);
+                String username = json.get("user").getAsString();
+                RobloxBotSession s = RobloxSessionManager.get(username);
+                if (s != null) s.respawn();
+                return "OK";
+            } catch (Exception e) {
+                res.status(400);
+                return "Bad request";
+            }
+        });
+
         // /npc route: Roblox player position updates → bot session movement
         sparkService.post("/npc", (req, res) -> {
             try {

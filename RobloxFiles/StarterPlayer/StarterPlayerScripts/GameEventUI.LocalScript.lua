@@ -147,6 +147,51 @@ local function updateHealth(healthStr)
 	end
 end
 
+-- ── Death screen ──────────────────────────────────────────────────────────
+
+local deathScreen = Instance.new("Frame")
+deathScreen.Name                 = "DeathScreen"
+deathScreen.Size                 = UDim2.new(1, 0, 1, 0)
+deathScreen.BackgroundColor3     = Color3.fromRGB(80, 0, 0)
+deathScreen.BackgroundTransparency = 0.35
+deathScreen.ZIndex               = 10
+deathScreen.Visible              = false
+deathScreen.Parent               = screen
+
+local deathTitle = Instance.new("TextLabel")
+deathTitle.Size                   = UDim2.new(1, 0, 0.15, 0)
+deathTitle.Position               = UDim2.new(0, 0, 0.33, 0)
+deathTitle.BackgroundTransparency = 1
+deathTitle.Text                   = "You Died!"
+deathTitle.TextColor3             = Color3.new(1, 1, 1)
+deathTitle.TextStrokeTransparency = 0.4
+deathTitle.TextStrokeColor3       = Color3.new(0, 0, 0)
+deathTitle.Font                   = Enum.Font.GothamBold
+deathTitle.TextScaled             = true
+deathTitle.ZIndex                 = 11
+deathTitle.Parent                 = deathScreen
+
+local respawnBtn = Instance.new("TextButton")
+respawnBtn.Size                   = UDim2.new(0.25, 0, 0.07, 0)
+respawnBtn.AnchorPoint            = Vector2.new(0.5, 0.5)
+respawnBtn.Position               = UDim2.new(0.5, 0, 0.54, 0)
+respawnBtn.BackgroundColor3       = Color3.fromRGB(60, 60, 60)
+respawnBtn.BackgroundTransparency = 0.2
+respawnBtn.Text                   = "Respawn"
+respawnBtn.TextColor3             = Color3.new(1, 1, 1)
+respawnBtn.TextStrokeTransparency = 0.5
+respawnBtn.Font                   = Enum.Font.GothamBold
+respawnBtn.TextScaled             = true
+respawnBtn.ZIndex                 = 11
+respawnBtn.Parent                 = deathScreen
+
+local respawnEvent = ReplicatedStorage:WaitForChild("RespawnEvent")
+
+respawnBtn.MouseButton1Click:Connect(function()
+	deathScreen.Visible = false
+	respawnEvent:FireServer()
+end)
+
 -- ── Event dispatcher ───────────────────────────────────────────────────────
 
 gameEvent.OnClientEvent:Connect(function(evtType, evtData)
@@ -158,5 +203,7 @@ gameEvent.OnClientEvent:Connect(function(evtType, evtData)
 		showActionbar(evtData)
 	elseif evtType == "health" then
 		updateHealth(evtData)
+	elseif evtType == "death" then
+		deathScreen.Visible = true
 	end
 end)

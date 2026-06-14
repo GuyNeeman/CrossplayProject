@@ -116,9 +116,9 @@ public class RobloxBotSession {
             ));
 
         } else if (packet instanceof ClientboundPlayerCombatKillPacket) {
-            // Auto-respawn so the bot reappears on the MC server after dying
+            // Tell Roblox to show the death screen; it will POST /respawn when the player clicks.
             spawned = false;
-            s.send(new ServerboundClientCommandPacket(ClientCommand.RESPAWN));
+            queue("death", "");
 
         } else if (packet instanceof ClientboundRespawnPacket) {
             // Server confirms respawn — bot is alive again
@@ -167,6 +167,13 @@ public class RobloxBotSession {
     public void sendMovement(double x, double y, double z, float yaw, float pitch, boolean onGround) {
         if (!isActive()) return;
         session.send(new ServerboundMovePlayerPosRotPacket(onGround, x, y, z, yaw, pitch));
+    }
+
+    /** Send the respawn command after the Roblox player clicks the death-screen Respawn button. */
+    public void respawn() {
+        if (session != null && session.isConnected()) {
+            session.send(new ServerboundClientCommandPacket(ClientCommand.RESPAWN));
+        }
     }
 
     /**
