@@ -16,9 +16,13 @@ import org.geysermc.mcprotocollib.protocol.data.game.setting.ChatVisibility;
 import org.geysermc.mcprotocollib.protocol.data.game.setting.SkinPart;
 import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.ServerboundClientInformationPacket;
 import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.ServerboundCustomPayloadPacket;
+import org.geysermc.mcprotocollib.protocol.data.game.ClientCommand;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundLoginPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundRespawnPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.player.ClientboundPlayerCombatKillPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.player.ClientboundPlayerPositionPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.player.ClientboundSetHealthPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.ServerboundClientCommandPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.level.ClientboundSoundPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.title.ClientboundSetActionBarTextPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.title.ClientboundSetSubtitleTextPacket;
@@ -110,6 +114,15 @@ public class RobloxBotSession {
                     Arrays.asList(SkinPart.values()),
                     HandPreference.RIGHT_HAND, false, true
             ));
+
+        } else if (packet instanceof ClientboundPlayerCombatKillPacket) {
+            // Auto-respawn so the bot reappears on the MC server after dying
+            spawned = false;
+            s.send(new ServerboundClientCommandPacket(ClientCommand.RESPAWN));
+
+        } else if (packet instanceof ClientboundRespawnPacket) {
+            // Server confirms respawn — bot is alive again
+            spawned = true;
 
         } else if (packet instanceof ClientboundPlayerPositionPacket pos) {
             // Acknowledge server teleport — server kicks if not confirmed

@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.entity.Entity;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.Sign;
 import org.bukkit.block.data.BlockData;
@@ -16,6 +17,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import spark.Service;
 
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -48,20 +50,28 @@ public class POSTHandler {
                     ? RobloxSessionManager.get(attackerName) : null;
 
             if (botSession != null && botSession.isActive()) {
-                // Look up target entity ID on main thread, then send a proper Interact/Attack packet.
-                // This makes the damage event properly attributed to the Roblox player's ServerPlayer.
+                // Look up entity ID on the main thread, then send a proper Interact/Attack packet.
+                // targetName is either a player name or a mob UUID (contains dashes).
+                boolean isMobUUID = targetName.contains("-");
                 try {
                     Integer entityId = Bukkit.getScheduler()
                             .callSyncMethod(JavaPlugin.getPlugin(CrossplayPackage.class), () -> {
-                                Player target = Bukkit.getPlayer(targetName);
-                                return target != null ? target.getEntityId() : -1;
+                                if (isMobUUID) {
+                                    try {
+                                        Entity mob = Bukkit.getEntity(UUID.fromString(targetName));
+                                        return mob != null ? mob.getEntityId() : -1;
+                                    } catch (IllegalArgumentException e) { return -1; }
+                                } else {
+                                    Player target = Bukkit.getPlayer(targetName);
+                                    return target != null ? target.getEntityId() : -1;
+                                }
                             }).get(2, TimeUnit.SECONDS);
                     if (entityId != -1) botSession.sendAttack(entityId);
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "[Crossplay] Attack lookup failed: " + e.getMessage());
                 }
             } else {
-                // Fallback: direct Bukkit damage (used if bot session not yet active)
+                // Fallback: direct Bukkit damage
                 final double dmg = damage;
                 new BukkitRunnable() {
                     @Override public void run() {

@@ -19,7 +19,6 @@ local function anchorImmediately(character)
 		return
 	end
 
-	-- HRP not yet in the character — watch for it with DescendantAdded (synchronous, no yield)
 	local conn
 	conn = character.DescendantAdded:Connect(function(desc)
 		if desc.Name == "HumanoidRootPart" and desc:IsA("BasePart") then
@@ -28,17 +27,29 @@ local function anchorImmediately(character)
 		end
 	end)
 
-	-- Async fallback in case DescendantAdded fires after WaitForChild anyway
 	local hrpFallback = character:WaitForChild("HumanoidRootPart", 5)
 	if hrpFallback then
 		hrpFallback.Anchored = true
 	end
 end
 
+-- Match Minecraft physics: jump ~1.25 blocks high, walk ~4.3 blocks/s
+local function applyMCPhysics(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.JumpHeight = 3.8   -- 1.25 blocks × 3 studs/block
+		humanoid.WalkSpeed  = 13    -- 4.3 blocks/s × 3 studs/block
+	end
+end
+
 if player.Character then
 	anchorImmediately(player.Character)
+	applyMCPhysics(player.Character)
 end
-player.CharacterAdded:Connect(anchorImmediately)
+player.CharacterAdded:Connect(function(character)
+	anchorImmediately(character)
+	applyMCPhysics(character)
+end)
 
 spawnEvent.OnClientEvent:Connect(function(position)
 	local character = player.Character

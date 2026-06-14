@@ -1,6 +1,5 @@
--- Sends a hit request to /attack when the Roblox player left-clicks on a MC player model.
--- Uses a filtered workspace:Raycast (only hits workspace.Players descendants) instead of
--- mouse.Target so the detection works reliably even when other UI is visible.
+-- Left-click to attack MC players (workspace.Players) or mobs (workspace.Mobs).
+-- Players are identified by the BillboardGui TextLabel; mobs by model.Name (UUID).
 local Players          = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -11,50 +10,57 @@ local attackEvent = ReplicatedStorage:WaitForChild("AttackEvent")
 
 local ATTACK_COOLDOWN = 0.5
 local lastAttack      = 0
+local ATTACK_RANGE    = 10  -- studs (≈3.3 MC blocks, slightly more than vanilla 3)
 
--- Raycast parameters: only consider parts inside workspace.Players
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Include
 
-local function getPlayersFolder()
-	return Workspace:FindFirstChild("Players")
-end
+-- Returns { targetId = string, isMob = bool } or nil
+local function getTarget()
+	local playersFolder = Workspace:FindFirstChild("Players")
+	local mobsFolder    = Workspace:FindFirstChild("Mobs")
 
--- Returns the MC player username if the camera ray hits a player model, else nil.
-local function getMCPlayerTarget()
-	local folder = getPlayersFolder()
-	if not folder or #folder:GetChildren() == 0 then return nil end
+	local targets = {}
+	if playersFolder then targets[#targets+1] = playersFolder end
+	if mobsFolder    then targets[#targets+1] = mobsFolder    end
+	if #targets == 0 then return nil end
 
-	rayParams.FilterDescendantsInstances = { folder }
+	rayParams.FilterDescendantsInstances = targets
 
 	local camera  = Workspace.CurrentCamera
 	local mouse   = player:GetMouse()
 	local unitRay = camera:ScreenPointToRay(mouse.X, mouse.Y)
-	local result  = Workspace:Raycast(unitRay.Origin, unitRay.Direction * 60, rayParams)
+	local result  = Workspace:Raycast(unitRay.Origin, unitRay.Direction * ATTACK_RANGE, rayParams)
 	if not result then return nil end
 
-	-- Walk up to find the direct child of the Players folder
+	-- Walk up to the direct child of whichever folder was hit
 	local part = result.Instance
-	local model = part.Parent
-	while model and model.Parent ~= folder do
+	local model = part
+	while model and model.Parent ~= playersFolder and model.Parent ~= mobsFolder do
 		model = model.Parent
 	end
-	if not model or model.Parent ~= folder then return nil end
+	if not model then return nil end
 
-	local gui   = model:FindFirstChildOfClass("BillboardGui")
-	if not gui then return nil end
-	local label = gui:FindFirstChildOfClass("TextLabel")
-	return label and label.Text or nil
+	if model.Parent == mobsFolder then
+		-- model.Name is the mob UUID
+		return { targetId = model.Name, isMob = true }
+	else
+		-- MC player: read name from BillboardGui
+		local gui   = model:FindFirstChildOfClass("BillboardGui")
+		local label = gui and gui:FindFirstChildOfClass("TextLabel")
+		local name  = label and label.Text
+		if not name or name == "" then return nil end
+		return { targetId = name, isMob = false }
+	end
 end
 
--- Visual crosshair: highlight cursor red when hovering over a MC player
-local crosshairHighlight = false
+-- Crosshair highlight when hovering over a valid target
+local highlighting = false
 RunService.RenderStepped:Connect(function()
-	local hovering = getMCPlayerTarget() ~= nil
-	if hovering ~= crosshairHighlight then
-		crosshairHighlight = hovering
-		-- Change mouse icon to signal a valid target (red dot = can attack)
-		player:GetMouse().Icon = hovering and "rbxasset://textures/Cursors/CrossCursor.png" or ""
+	local hit = getTarget() ~= nil
+	if hit ~= highlighting then
+		highlighting = hit
+		player:GetMouse().Icon = hit and "rbxasset://textures/Cursors/CrossCursor.png" or ""
 	end
 end)
 
@@ -65,9 +71,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	local now = tick()
 	if now - lastAttack < ATTACK_COOLDOWN then return end
 
-	local targetName = getMCPlayerTarget()
-	if targetName then
+	local hit = getTarget()
+	if hit then
 		lastAttack = now
-		attackEvent:FireServer(targetName)
+		attackEvent:FireServer(hit.targetId)
 	end
 end)

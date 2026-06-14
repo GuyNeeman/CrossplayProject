@@ -110,11 +110,28 @@ local function handleRequest()
 			usernameToUUID[username] = uuid
 			uuidToUsername[uuid]     = username
 
+			-- Scale body parts to match MC proportions (1 block = 3 studs)
+			-- MC player: 0.6w × 1.8h total. Torso ≈ 0.6×0.75×0.375 blocks
+			local function scalePart(name, size)
+				local p = model:FindFirstChild(name, true)
+				if p and p:IsA("BasePart") then p.Size = size end
+			end
+			scalePart("Head",      Vector3.new(1.8, 1.8, 1.8))
+			scalePart("Torso",     Vector3.new(1.8, 2.25, 0.9))
+			scalePart("HumanoidRootPart", Vector3.new(1.8, 2.25, 0.9))
+			scalePart("Right Arm", Vector3.new(0.9, 2.25, 0.9))
+			scalePart("Left Arm",  Vector3.new(0.9, 2.25, 0.9))
+			scalePart("Right Leg", Vector3.new(0.9, 2.25, 0.9))
+			scalePart("Left Leg",  Vector3.new(0.9, 2.25, 0.9))
+
+			-- Use recursive search so head works even if nested inside a union
+			local headPart = model:FindFirstChild("Head", true)
+
 			local billboard = Instance.new("BillboardGui")
 			billboard.Name          = "PlayerNameLabel"
 			billboard.Size          = UDim2.new(0, 100, 0, 20)
 			billboard.StudsOffset   = Vector3.new(0, 1.2, 0)
-			billboard.Adornee       = model:FindFirstChild("Head")
+			billboard.Adornee       = headPart
 			billboard.AlwaysOnTop   = false
 			billboard.MaxDistance   = 50
 			billboard.Parent        = model
@@ -162,10 +179,10 @@ local function handleRequest()
 
 		TweenService:Create(model.PrimaryPart, BODY_TWEEN, { CFrame = CFrame.new(position) }):Play()
 
-		local head = model:FindFirstChild("Head")
+		local head = model:FindFirstChild("Head", true)
 		if head then
 			TweenService:Create(head, BODY_TWEEN, {
-				CFrame = CFrame.new(position + Vector3.new(0, 2, 0))
+				CFrame = CFrame.new(position + Vector3.new(0, 2.7, 0))
 					* CFrame.Angles(0, yawRad, 0)
 					* CFrame.Angles(math.rad(-(d.pitch or 0)) - crouchTilt, 0, 0)
 			}):Play()
