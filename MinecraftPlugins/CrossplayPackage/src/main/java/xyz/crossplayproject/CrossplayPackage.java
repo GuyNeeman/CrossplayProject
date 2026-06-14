@@ -1,8 +1,12 @@
 package xyz.crossplayproject;
 
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
 import spark.Service;
 
 import java.util.List;
@@ -89,12 +93,19 @@ public class CrossplayPackage extends JavaPlugin {
                         RobloxSessionManager.connect(update.user);
                         // Session connecting — movement will start flowing on next poll
                     } else if (session.isActive()) {
-                        // Coordinate mapping: Roblox 3-stud grid → 1 MC block
-                        // +0.5 centres the player inside the block, matching Citizens NPC placement
-                        session.sendMovement(
-                                update.x + 0.5, update.y, update.z + 0.5,
-                                update.yaw, update.pitch, true
-                        );
+                        // Use server-side Bukkit teleport so Paper's movement validator can't
+                        // reject the position (it would rubber-band a client-side move packet
+                        // when the bot spawns at world spawn and needs to jump 100+ blocks).
+                        final double tx = update.x + 0.5, ty = update.y, tz = update.z + 0.5;
+                        final float tyaw = update.yaw, tpitch = update.pitch;
+                        new BukkitRunnable() {
+                            @Override public void run() {
+                                org.bukkit.entity.Player p = Bukkit.getPlayer(update.user);
+                                if (p == null) return;
+                                World w = p.getWorld();
+                                p.teleport(new Location(w, tx, ty, tz, tyaw, tpitch));
+                            }
+                        }.runTask(this);
                     }
                 }
                 return "OK";
