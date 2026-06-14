@@ -44,17 +44,18 @@ import java.util.logging.Logger;
 public class RobloxBotSession {
 
     private static final Logger LOG = Logger.getLogger("Crossplay");
-    private static final int SERVER_PORT = 25565;
 
     private final String username;
+    private final int serverPort;
     private volatile TcpClientSession session;
     private volatile boolean spawned = false;
     private final ConcurrentLinkedDeque<RobloxEvent> eventQueue = new ConcurrentLinkedDeque<>();
 
     public record RobloxEvent(String type, String data) {}
 
-    public RobloxBotSession(String username) {
+    public RobloxBotSession(String username, int serverPort) {
         this.username = username;
+        this.serverPort = serverPort;
     }
 
     // ── Connection ────────────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ public class RobloxBotSession {
         // Offline mode: username only — requires online-mode=false in server.properties
         MinecraftProtocol protocol = new MinecraftProtocol(username);
 
-        session = new TcpClientSession("127.0.0.1", SERVER_PORT, protocol);
+        session = new TcpClientSession("127.0.0.1", serverPort, protocol);
         session.setFlag(MinecraftConstants.SESSION_SERVICE_KEY, new SessionService());
 
         session.addListener(new SessionAdapter() {

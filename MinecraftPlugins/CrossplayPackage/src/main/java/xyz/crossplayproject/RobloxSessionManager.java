@@ -16,12 +16,21 @@ public class RobloxSessionManager {
 
     private static final Logger LOG = Logger.getLogger("Crossplay");
     private static final ConcurrentHashMap<String, RobloxBotSession> sessions = new ConcurrentHashMap<>();
+    private static volatile int serverPort = 25565;
+
+    /** Called once from CrossplayPackage.onEnable() with the real server port. */
+    public static void setServerPort(int port) {
+        serverPort = port;
+        LOG.info("[Crossplay] Bot sessions will connect to localhost:" + port);
+    }
+
+    public static int getServerPort() { return serverPort; }
 
     /** Connect a new Roblox player. No-op if already connected. */
     public static void connect(String username) {
         if (sessions.containsKey(username)) return;
         LOG.info("[Crossplay] Connecting Roblox player: " + username);
-        RobloxBotSession s = new RobloxBotSession(username);
+        RobloxBotSession s = new RobloxBotSession(username, serverPort);
         sessions.put(username, s);
         s.connect();
     }

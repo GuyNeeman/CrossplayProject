@@ -31,6 +31,8 @@ public class CrossplayPackage extends JavaPlugin {
         Set<Material> nonObstructingBlocks  = loadMaterials(config.getStringList("blocks.nonObstructing"));
         boolean enableCulling = config.getBoolean("enableCulling", false);
 
+        RobloxSessionManager.setServerPort(getServer().getPort());
+
         blockHandler    = new BlockHandler(biomeSensitiveBlocks, nonObstructingBlocks, enableCulling);
         entityHandler   = new EntityHandler();
         postHandler     = new POSTHandler();
