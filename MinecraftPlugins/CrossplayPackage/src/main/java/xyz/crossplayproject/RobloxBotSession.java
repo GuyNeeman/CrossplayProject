@@ -54,12 +54,18 @@ public class RobloxBotSession {
     private volatile TcpClientSession session;
     private volatile boolean spawned = false;
     private final ConcurrentLinkedDeque<RobloxEvent> eventQueue = new ConcurrentLinkedDeque<>();
+    private final java.util.concurrent.ScheduledExecutorService scheduler;
 
     public record RobloxEvent(String type, String data) {}
 
     public RobloxBotSession(String username, int serverPort) {
         this.username = username;
         this.serverPort = serverPort;
+        this.scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "crossplay-respawn-" + username);
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     // ── Connection ────────────────────────────────────────────────────────────
@@ -90,6 +96,7 @@ public class RobloxBotSession {
 
     public void disconnect() {
         spawned = false;
+        scheduler.shutdownNow();
         if (session != null && session.isConnected()) {
             session.disconnect("Roblox player disconnected");
         }
@@ -117,8 +124,10 @@ public class RobloxBotSession {
 
         } else if (packet instanceof ClientboundPlayerCombatKillPacket) {
             // Tell Roblox to show the death screen; it will POST /respawn when the player clicks.
+            // Fallback: auto-respawn after 30 s in case the UI never fires (e.g. Studio not updated).
             spawned = false;
             queue("death", "");
+            scheduler.schedule(() -> { if (!spawned) respawn(); }, 30, java.util.concurrent.TimeUnit.SECONDS);
 
         } else if (packet instanceof ClientboundRespawnPacket) {
             // Server confirms respawn — bot is alive again
