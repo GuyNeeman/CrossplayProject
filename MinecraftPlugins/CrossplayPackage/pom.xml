@@ -73,6 +73,11 @@
                   <pattern>io.netty</pattern>
                   <shadedPattern>xyz.crossplayproject.libs.netty</shadedPattern>
                 </relocation>
+                <!-- Geyser also loads com.nukkitx.fastutil — isolate our copy to avoid conflicts -->
+                <relocation>
+                  <pattern>com.nukkitx</pattern>
+                  <shadedPattern>xyz.crossplayproject.libs.nukkitx</shadedPattern>
+                </relocation>
               </relocations>
               <filters>
                 <filter>

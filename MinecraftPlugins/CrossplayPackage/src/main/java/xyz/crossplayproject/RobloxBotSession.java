@@ -97,11 +97,13 @@ public class RobloxBotSession {
 
         if (packet instanceof ClientboundLoginPacket) {
             spawned = true;
-            // Declare client brand — some anti-cheat plugins check for this
-            s.send(new ServerboundCustomPayloadPacket(
-                    Key.key("minecraft:brand"),
-                    "vanilla".getBytes(StandardCharsets.UTF_8)
-            ));
+            // Brand payload must be a Minecraft-encoded String: VarInt(length) + UTF-8 bytes.
+            // Sending raw bytes causes the server to read 'v'=118 as the length and crash.
+            byte[] brandStr = "vanilla".getBytes(StandardCharsets.UTF_8);
+            byte[] brandPayload = new byte[1 + brandStr.length]; // len=7 < 128 → 1-byte VarInt
+            brandPayload[0] = (byte) brandStr.length;
+            System.arraycopy(brandStr, 0, brandPayload, 1, brandStr.length);
+            s.send(new ServerboundCustomPayloadPacket(Key.key("minecraft:brand"), brandPayload));
             // Client settings: 8-arg constructor in MCProtocolLib 1.21-SNAPSHOT (no ParticleStatus)
             s.send(new ServerboundClientInformationPacket(
                     "en_us", 10, ChatVisibility.FULL, true,
