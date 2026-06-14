@@ -11,7 +11,7 @@ local function sendData(player, disconnect)
 	local postData
 
 	if disconnect then
-		postData = HttpService:JSONEncode({ user = tostring(player.DisplayName), disconnect = true })
+		postData = HttpService:JSONEncode({ user = tostring(player.Name), disconnect = true })
 	else
 		local humanoidRootPart = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 		if not humanoidRootPart then return end
@@ -32,7 +32,7 @@ local function sendData(player, disconnect)
 		end
 
 		postData = HttpService:JSONEncode({
-			user  = tostring(player.DisplayName),
+			user  = tostring(player.Name),
 			x     = adjustedX,
 			y     = adjustedY,
 			z     = adjustedZ,
