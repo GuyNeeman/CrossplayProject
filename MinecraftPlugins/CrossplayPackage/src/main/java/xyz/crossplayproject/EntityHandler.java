@@ -1,7 +1,6 @@
 package xyz.crossplayproject;
 
 import com.google.gson.Gson;
-import net.citizensnpcs.api.npc.NPC;
 import org.bukkit.*;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
@@ -32,23 +31,19 @@ public class EntityHandler implements Listener {
 
     private static final Logger logger = Logger.getLogger(EntityHandler.class.getName());
     private final Gson gson = new Gson();
-    // Skin PNG cache: UUID string → raw PNG bytes (populated on first request per UUID)
+
     private final ConcurrentHashMap<String, byte[]> skinCache = new ConcurrentHashMap<>();
-    // Tracks when each player last landed an attack hit (epoch ms); used for isAttacking flag
     private static final ConcurrentHashMap<UUID, Long> recentAttackers = new ConcurrentHashMap<>();
     private static final long ATTACK_VISIBLE_MS = 400;
-
-    // Tracks blocks currently being mined: player UUID → damage record
     private static final ConcurrentHashMap<UUID, BlockDamageRecord> activeBreaks = new ConcurrentHashMap<>();
 
-    // Thread-safe snapshots of Bukkit world state; refreshed from the main thread every 2 ticks
-    // by CrossplayPackage's runTaskTimer so Spark threads never touch Bukkit API directly.
+    // Thread-safe snapshots updated by refreshSnapshots() on the main thread every 2 ticks.
     private volatile String playersSnapshot = "[]";
     private volatile String mobsSnapshot    = "[]";
     private volatile String worldSnapshot   = "{}";
     private volatile String spawnSnapshot   = "{}";
 
-    /** Called from the main thread every 2 ticks (see CrossplayPackage). */
+    /** Called from the main thread every 2 ticks (CrossplayPackage runTaskTimer). */
     public void refreshSnapshots() {
         playersSnapshot = gson.toJson(getPlayerPositions());
         mobsSnapshot    = gson.toJson(getMobData());
@@ -62,11 +57,9 @@ public class EntityHandler implements Listener {
         final int x, y, z;
         final long startMs;
         final float hardness;
-
         BlockDamageRecord(int x, int y, int z, long startMs, float hardness) {
             this.x = x; this.y = y; this.z = z;
-            this.startMs = startMs;
-            this.hardness = hardness;
+            this.startMs = startMs; this.hardness = hardness;
         }
     }
 
@@ -81,7 +74,7 @@ public class EntityHandler implements Listener {
     public void onBlockDamage(BlockDamageEvent event) {
         org.bukkit.block.Block b = event.getBlock();
         float hardness = b.getType().getHardness();
-        if (hardness < 0) return; // unbreakable
+        if (hardness < 0) return;
         activeBreaks.put(event.getPlayer().getUniqueId(),
                 new BlockDamageRecord(b.getX(), b.getY(), b.getZ(), System.currentTimeMillis(), hardness));
     }
@@ -126,35 +119,30 @@ public class EntityHandler implements Listener {
             return spawnSnapshot;
         });
 
-        // /blockdamage reads only ConcurrentHashMap entries populated by event handlers — safe from any thread.
         spark.get("/blockdamage", (req, res) -> {
             res.type("application/json");
             long now = System.currentTimeMillis();
             List<BlockDamageInfo> list = new ArrayList<>();
             for (BlockDamageRecord rec : activeBreaks.values()) {
-                double elapsedSec = (now - rec.startMs) / 1000.0;
-                // Minecraft break time ≈ hardness * 1.5 seconds for hand; clamp stage to 0-9
-                double breakTimeSec = Math.max(0.05, rec.hardness * 1.5);
-                int stage = (int) Math.min(9, Math.floor(elapsedSec / breakTimeSec * 10));
+                double elapsed = (now - rec.startMs) / 1000.0;
+                double breakTime = Math.max(0.05, rec.hardness * 1.5);
+                int stage = (int) Math.min(9, Math.floor(elapsed / breakTime * 10));
                 list.add(new BlockDamageInfo(rec.x, rec.y, rec.z, stage));
             }
             return gson.toJson(list);
         });
 
-        // Inventory must be read on the main thread; callSyncMethod bridges Spark → Bukkit safely.
+        // Inventory: Roblox player is now a real Bukkit player — read directly.
         spark.get("/inventory/:username", (req, res) -> {
             res.type("application/json");
             String username = req.params(":username");
             try {
                 List<InventorySlot> slots = Bukkit.getScheduler()
                         .callSyncMethod(JavaPlugin.getPlugin(CrossplayPackage.class), () -> {
-                            NPC npc = NPCHandler.getNPC(username);
-                            if (npc == null || !npc.isSpawned()
-                                    || !(npc.getEntity() instanceof org.bukkit.entity.Player npcPlayer)) {
-                                return List.<InventorySlot>of();
-                            }
+                            org.bukkit.entity.Player p = Bukkit.getPlayer(username);
+                            if (p == null) return List.<InventorySlot>of();
                             List<InventorySlot> result = new ArrayList<>();
-                            ItemStack[] contents = npcPlayer.getInventory().getContents();
+                            ItemStack[] contents = p.getInventory().getContents();
                             for (int i = 0; i < contents.length; i++) {
                                 ItemStack item = contents[i];
                                 if (item != null && item.getType() != Material.AIR) {
@@ -165,38 +153,34 @@ public class EntityHandler implements Listener {
                         }).get(5, TimeUnit.SECONDS);
                 return gson.toJson(slots);
             } catch (Exception e) {
-                logger.log(Level.WARNING, "[Crossplay] Failed to read inventory for " + username, e);
+                logger.log(Level.WARNING, "[Crossplay] Inventory read failed for " + username, e);
                 return "[]";
             }
         });
 
-        // Geyser-style event relay: drains intercepted packets (title, actionbar, sound, health)
-        // queued by PacketInterceptor for this Roblox player's NPC.
+        // Event relay: drains server→Roblox events (title, actionbar, health, sound)
+        // captured by the MCProtocolLib session listener.
         spark.get("/events/:username", (req, res) -> {
             res.type("application/json");
             String username = req.params(":username");
-            List<PacketInterceptor.RobloxEvent> events = PacketInterceptor.drain(username);
-            return gson.toJson(events);
+            RobloxBotSession session = RobloxSessionManager.get(username);
+            if (session == null) return "[]";
+            return gson.toJson(session.drain());
         });
 
-        // Skin proxy: fetches the Minecraft skin PNG from Crafatar and caches it.
-        // Roblox requests from this endpoint so it never has to reach an external HTTPS server.
+        // Skin proxy — fetches PNG from Crafatar and caches it for Roblox HTTP requests.
         spark.get("/skin/:uuid", (req, res) -> {
             String uuid = req.params(":uuid");
-            if (uuid == null || uuid.isEmpty()) {
-                res.status(400);
-                return "Missing UUID";
-            }
+            if (uuid == null || uuid.isEmpty()) { res.status(400); return "Missing UUID"; }
 
             byte[] skinData = skinCache.get(uuid);
             if (skinData == null) {
                 try {
-                    URL skinUrl = new URL("https://crafatar.com/skins/" + uuid);
-                    HttpURLConnection conn = (HttpURLConnection) skinUrl.openConnection();
+                    URL url = new URL("https://crafatar.com/skins/" + uuid);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setConnectTimeout(6000);
                     conn.setReadTimeout(10000);
                     conn.setRequestProperty("User-Agent", "CrossplayProject/1.0");
-
                     int status = conn.getResponseCode();
                     if (status == 200) {
                         try (InputStream in = conn.getInputStream()) {
@@ -205,12 +189,12 @@ public class EntityHandler implements Listener {
                         }
                     } else {
                         res.status(404);
-                        return "Skin not found for UUID: " + uuid + " (Crafatar returned " + status + ")";
+                        return "Skin not found (Crafatar returned " + status + ")";
                     }
                 } catch (Exception e) {
-                    logger.log(Level.WARNING, "Failed to fetch skin for UUID " + uuid, e);
+                    logger.log(Level.WARNING, "[Crossplay] Skin fetch failed for " + uuid, e);
                     res.status(500);
-                    return "Error fetching skin: " + e.getMessage();
+                    return "Error: " + e.getMessage();
                 }
             }
 
@@ -226,8 +210,9 @@ public class EntityHandler implements Listener {
         List<PlayerPosition> positions = new ArrayList<>();
         long now = System.currentTimeMillis();
         for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
-            // Never expose spectator-mode players to Roblox
             if (player.getGameMode() == GameMode.SPECTATOR) continue;
+            // Exclude our own MCProtocolLib bot connections — Roblox renders their own bodies.
+            if (RobloxSessionManager.isBot(player.getName())) continue;
 
             boolean isAttacking = recentAttackers.containsKey(player.getUniqueId())
                     && now - recentAttackers.get(player.getUniqueId()) < ATTACK_VISIBLE_MS;
@@ -254,26 +239,19 @@ public class EntityHandler implements Listener {
         for (World world : Bukkit.getServer().getWorlds()) {
             for (Chunk chunk : world.getLoadedChunks()) {
                 for (Entity entity : chunk.getEntities()) {
-                    if (entity instanceof LivingEntity livingEntity && !(entity instanceof org.bukkit.entity.Player)) {
+                    if (entity instanceof LivingEntity le
+                            && !(entity instanceof org.bukkit.entity.Player)) {
                         mobPositions.add(new MobPosition(
-                                livingEntity.getUniqueId().toString(),
-                                livingEntity.getLocation().getX(),
-                                livingEntity.getLocation().getY(),
-                                livingEntity.getLocation().getZ(),
-                                livingEntity.getLocation().getYaw(),
-                                livingEntity.getLocation().getPitch(),
-                                livingEntity.getType().name()
+                                le.getUniqueId().toString(),
+                                le.getLocation().getX(), le.getLocation().getY(), le.getLocation().getZ(),
+                                le.getLocation().getYaw(), le.getLocation().getPitch(),
+                                le.getType().name()
                         ));
-                    } else if (entity instanceof TNTPrimed primedTNT) {
-                        Location tntLocation = primedTNT.getLocation();
+                    } else if (entity instanceof TNTPrimed tnt) {
                         mobPositions.add(new MobPosition(
-                                primedTNT.getUniqueId().toString(),
-                                tntLocation.getX(),
-                                tntLocation.getY(),
-                                tntLocation.getZ(),
-                                0,
-                                0,
-                                "PRIMED_TNT"
+                                tnt.getUniqueId().toString(),
+                                tnt.getLocation().getX(), tnt.getLocation().getY(), tnt.getLocation().getZ(),
+                                0, 0, "PRIMED_TNT"
                         ));
                     }
                 }
@@ -287,97 +265,63 @@ public class EntityHandler implements Listener {
         return new WorldState(world.getTime(), world.isThundering(), world.hasStorm());
     }
 
+    // ── Inner data classes ────────────────────────────────────────────────────
+
     private static class PlayerPosition {
-        private String uuid;
-        private String name;
-        private Material mainItem;
-        private Material offItem;
-        private double x;
-        private double y;
-        private double z;
-        private float yaw;
-        private float pitch;
-        private boolean crouch;
-        private boolean isAttacking;
+        private String uuid, name;
+        private Material mainItem, offItem;
+        private double x, y, z;
+        private float yaw, pitch;
+        private boolean crouch, isAttacking;
 
         public PlayerPosition(String uuid, String name, Material mainItem, Material offItem,
                               double x, double y, double z, float yaw, float pitch,
                               boolean crouch, boolean isAttacking) {
-            this.uuid = uuid;
-            this.name = name;
-            this.mainItem = mainItem;
-            this.offItem = offItem;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.yaw = yaw;
-            this.pitch = pitch;
-            this.crouch = crouch;
-            this.isAttacking = isAttacking;
+            this.uuid = uuid; this.name = name;
+            this.mainItem = mainItem; this.offItem = offItem;
+            this.x = x; this.y = y; this.z = z;
+            this.yaw = yaw; this.pitch = pitch;
+            this.crouch = crouch; this.isAttacking = isAttacking;
         }
     }
 
     private static class MobPosition {
-        private String uuid;
-        private double x;
-        private double y;
-        private double z;
-        private float yaw;
-        private float pitch;
-        private String mobType;
+        private String uuid, mobType;
+        private double x, y, z;
+        private float yaw, pitch;
 
-        public MobPosition(String uuid, double x, double y, double z, float yaw, float pitch, String mobType) {
-            this.uuid = uuid;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.yaw = yaw;
-            this.pitch = pitch;
-            this.mobType = mobType;
+        public MobPosition(String uuid, double x, double y, double z,
+                           float yaw, float pitch, String mobType) {
+            this.uuid = uuid; this.x = x; this.y = y; this.z = z;
+            this.yaw = yaw; this.pitch = pitch; this.mobType = mobType;
         }
     }
 
     private static class WorldState {
         private long time;
-        private boolean thundering;
-        private boolean raining;
-
+        private boolean thundering, raining;
         public WorldState(long time, boolean thundering, boolean raining) {
-            this.time = time;
-            this.thundering = thundering;
-            this.raining = raining;
+            this.time = time; this.thundering = thundering; this.raining = raining;
         }
     }
 
     private static class SpawnLocation {
-        private double x;
-        private double y;
-        private double z;
-
-        public SpawnLocation(double x, double y, double z) {
-            this.x = x;
-            this.y = y;
-            this.z = z;
-        }
+        private double x, y, z;
+        public SpawnLocation(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
     }
 
     private static class BlockDamageInfo {
         private int x, y, z, stage;
-
         public BlockDamageInfo(int x, int y, int z, int stage) {
             this.x = x; this.y = y; this.z = z; this.stage = stage;
         }
     }
 
     private static class InventorySlot {
-        private int slot;
+        private int slot, count;
         private String item;
-        private int count;
-
         public InventorySlot(int slot, String item, int count) {
-            this.slot = slot;
-            this.item = item;
-            this.count = count;
+            this.slot = slot; this.item = item; this.count = count;
         }
     }
 }

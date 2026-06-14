@@ -39,6 +39,7 @@
             </goals>
             <configuration>
               <relocations>
+                <!-- Spark HTTP server -->
                 <relocation>
                   <pattern>spark</pattern>
                   <shadedPattern>xyz.crossplayproject.libs.spark</shadedPattern>
@@ -54,6 +55,23 @@
                 <relocation>
                   <pattern>org.slf4j</pattern>
                   <shadedPattern>xyz.crossplayproject.libs.slf4j</shadedPattern>
+                </relocation>
+                <!-- MCProtocolLib and its transitive deps -->
+                <relocation>
+                  <pattern>org.geysermc.mcprotocollib</pattern>
+                  <shadedPattern>xyz.crossplayproject.libs.mcprotocollib</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.cloudburstmc</pattern>
+                  <shadedPattern>xyz.crossplayproject.libs.cloudburstmc</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>com.github.steveice10</pattern>
+                  <shadedPattern>xyz.crossplayproject.libs.steveice10</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>io.netty</pattern>
+                  <shadedPattern>xyz.crossplayproject.libs.netty</shadedPattern>
                 </relocation>
               </relocations>
               <filters>
@@ -81,61 +99,69 @@
   </build>
 
   <repositories>
-      <repository>
-          <id>spigotmc-repo</id>
-          <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
-      </repository>
-      <repository>
-          <id>sonatype</id>
-          <url>https://oss.sonatype.org/content/groups/public/</url>
-      </repository>
-      <repository>
-          <id>citizens-repo</id>
-          <url>https://maven.citizensnpcs.co/repo</url>
-      </repository>
+    <repository>
+      <id>spigotmc-repo</id>
+      <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
+    </repository>
+    <repository>
+      <id>sonatype</id>
+      <url>https://oss.sonatype.org/content/groups/public/</url>
+    </repository>
+    <!-- OpenCollab main: cloudburstmc-math, nukkitx-fastutil (release deps of MCProtocolLib) -->
+    <repository>
+      <id>opencollab</id>
+      <url>https://repo.opencollab.dev/main/</url>
+    </repository>
+    <!-- OpenCollab snapshots: MCProtocolLib itself (only published as snapshots) -->
+    <repository>
+      <id>opencollab-snapshots</id>
+      <url>https://repo.opencollab.dev/maven-snapshots/</url>
+      <snapshots><enabled>true</enabled></snapshots>
+      <releases><enabled>false</enabled></releases>
+    </repository>
   </repositories>
 
   <dependencies>
-      <dependency>
-          <groupId>org.spigotmc</groupId>
-          <artifactId>spigot-api</artifactId>
-          <version>1.21.1-R0.1-SNAPSHOT</version>
-          <scope>provided</scope>
-      </dependency>
-      <dependency>
-          <groupId>com.sparkjava</groupId>
-          <artifactId>spark-core</artifactId>
-          <version>2.9.4</version>
-      </dependency>
-      <dependency>
-          <groupId>org.json</groupId>
-          <artifactId>json</artifactId>
-          <version>20250107</version>
-      </dependency>
-      <dependency>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-nop</artifactId>
-          <version>1.7.36</version>
-      </dependency>
-      <!-- Netty is bundled inside the Paper server JAR at runtime; provided here for compilation only -->
-      <dependency>
-          <groupId>io.netty</groupId>
-          <artifactId>netty-all</artifactId>
-          <version>4.1.107.Final</version>
-          <scope>provided</scope>
-      </dependency>
-      <dependency>
-          <groupId>net.citizensnpcs</groupId>
-          <artifactId>citizens-main</artifactId>
-          <version>2.0.35-SNAPSHOT</version>
-          <type>jar</type>
-          <scope>provided</scope>
-          <exclusions>
-              <exclusion>
-                  <groupId>*</groupId>
-                  <artifactId>*</artifactId>
-              </exclusion>
-          </exclusions>
-      </dependency>
+    <dependency>
+      <groupId>org.spigotmc</groupId>
+      <artifactId>spigot-api</artifactId>
+      <version>1.21.1-R0.1-SNAPSHOT</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- HTTP server -->
+    <dependency>
+      <groupId>com.sparkjava</groupId>
+      <artifactId>spark-core</artifactId>
+      <version>2.9.4</version>
+    </dependency>
+    <dependency>
+      <groupId>org.json</groupId>
+      <artifactId>json</artifactId>
+      <version>20250107</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+
+    <!--
+      MCProtocolLib: MC 1.21 and 1.21.1 share protocol version 767.
+      Shaded and relocated into xyz.crossplayproject.libs.mcprotocollib.
+    -->
+    <dependency>
+      <groupId>org.geysermc.mcprotocollib</groupId>
+      <artifactId>protocol</artifactId>
+      <version>1.21-SNAPSHOT</version>
+    </dependency>
+
+    <!-- Adventure plain-text serializer — provided by Paper at runtime -->
+    <dependency>
+      <groupId>net.kyori</groupId>
+      <artifactId>adventure-text-serializer-plain</artifactId>
+      <version>4.17.0</version>
+      <scope>provided</scope>
+    </dependency>
   </dependencies>
 </project>

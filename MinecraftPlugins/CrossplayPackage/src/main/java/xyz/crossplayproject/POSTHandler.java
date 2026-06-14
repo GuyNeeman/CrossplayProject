@@ -3,7 +3,6 @@ package xyz.crossplayproject;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import net.citizensnpcs.api.npc.NPC;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
@@ -17,33 +16,60 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import spark.Service;
 
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 import static org.bukkit.Bukkit.getLogger;
 
 public class POSTHandler {
 
+    private static final Logger LOG = Logger.getLogger("Crossplay");
     private final Gson gson = new Gson();
 
     public void setupRoutes(Service spark) {
-        spark.get("/favicon.ico", (req, res) -> "");
 
-        // Direct player attack — called by the Roblox client when a Roblox player
-        // punches a Minecraft player model. Damages the target by the given amount.
+        /**
+         * Attack endpoint: Roblox player punches a Minecraft player.
+         *
+         * With the proxy approach the attack goes through the bot's real ServerPlayer,
+         * so EntityDamageByEntityEvent fires with the correct damager — plugins see it
+         * as a legitimate hit, kill credits and achievements work properly.
+         *
+         * Request body: { "attacker": "<robloxName>", "target": "<mcName>", "damage": 1.0 }
+         */
         spark.post("/attack", (req, res) -> {
             JsonObject json = gson.fromJson(req.body(), JsonObject.class);
-            String targetName = json.get("target").getAsString();
-            double damage = json.has("damage") ? json.get("damage").getAsDouble() : 1.0;
+            String targetName   = json.get("target").getAsString();
+            String attackerName = json.has("attacker") ? json.get("attacker").getAsString() : null;
+            double damage       = json.has("damage") ? json.get("damage").getAsDouble() : 1.0;
 
-            new BukkitRunnable() {
-                @Override
-                public void run() {
-                    Player target = Bukkit.getPlayer(targetName);
-                    if (target != null) {
-                        target.damage(damage);
-                    } else {
-                        getLogger().warning("[Attack] Target player not found: " + targetName);
-                    }
+            RobloxBotSession botSession = attackerName != null
+                    ? RobloxSessionManager.get(attackerName) : null;
+
+            if (botSession != null && botSession.isActive()) {
+                // Look up target entity ID on main thread, then send a proper Interact/Attack packet.
+                // This makes the damage event properly attributed to the Roblox player's ServerPlayer.
+                try {
+                    Integer entityId = Bukkit.getScheduler()
+                            .callSyncMethod(JavaPlugin.getPlugin(CrossplayPackage.class), () -> {
+                                Player target = Bukkit.getPlayer(targetName);
+                                return target != null ? target.getEntityId() : -1;
+                            }).get(2, TimeUnit.SECONDS);
+                    if (entityId != -1) botSession.sendAttack(entityId);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "[Crossplay] Attack lookup failed: " + e.getMessage());
                 }
-            }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
+            } else {
+                // Fallback: direct Bukkit damage (used if bot session not yet active)
+                final double dmg = damage;
+                new BukkitRunnable() {
+                    @Override public void run() {
+                        Player target = Bukkit.getPlayer(targetName);
+                        if (target != null) target.damage(dmg);
+                    }
+                }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
+            }
 
             res.status(200);
             return "OK";
@@ -55,24 +81,15 @@ public class POSTHandler {
             int y = json.get("y").getAsInt();
             int z = json.get("z").getAsInt();
             String action = json.get("action").getAsString();
+            String playerName = json.has("player") ? json.get("player").getAsString() : null;
 
             World world = Bukkit.getWorlds().getFirst();
 
             switch (action.toUpperCase()) {
-                case "BUILD":
-                    buildBlock(world, x, y, z, json);
-                    break;
-                case "BREAK":
-                    breakBlock(world, x, y, z);
-                    break;
-                case "TOGGLE":
-                    toggleBlock(world, x, y, z);
-                    break;
-                case "EDIT":
-                    editSign(world, x, y, z, json);
-                    break;
-                default:
-                    break;
+                case "BUILD"  -> buildBlock(world, x, y, z, json);
+                case "BREAK"  -> breakBlock(world, x, y, z, playerName);
+                case "TOGGLE" -> toggleBlock(world, x, y, z);
+                case "EDIT"   -> editSign(world, x, y, z, json);
             }
 
             response.status(200);
@@ -87,11 +104,10 @@ public class POSTHandler {
                 Material material = Material.valueOf(json.get("material").getAsString());
                 JsonElement directionElement = json.get("direction");
                 if (directionElement == null || directionElement.isJsonNull()) {
-                    getLogger().warning("[POST] Direction has not been set in the POST payload.");
+                    getLogger().warning("[POST] Direction not set in BUILD payload.");
                     return;
                 }
-                String directionString = directionElement.getAsString();
-                BlockFace direction = BlockFace.valueOf(directionString);
+                BlockFace direction = BlockFace.valueOf(directionElement.getAsString());
                 Block block = world.getBlockAt(x, y, z);
                 if (block.getType() == Material.AIR) {
                     block.setType(material);
@@ -99,13 +115,14 @@ public class POSTHandler {
                         directional.setFacing(direction);
                         block.setBlockData(directional);
                     }
-                    world.playSound(block.getLocation(), block.getType().createBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
+                    world.playSound(block.getLocation(),
+                            block.getType().createBlockData().getSoundGroup().getPlaceSound(), 1.0f, 1.0f);
                 }
             }
         }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
     }
 
-    private void breakBlock(World world, int x, int y, int z) {
+    private void breakBlock(World world, int x, int y, int z, String playerName) {
         new BukkitRunnable() {
             @Override
             public void run() {
@@ -114,33 +131,18 @@ public class POSTHandler {
 
                 world.playEffect(block.getLocation(), Effect.STEP_SOUND, block.getType());
 
-                // Route natural drops to the nearest Roblox NPC within 32 horizontal blocks.
-                java.util.Collection<ItemStack> drops = block.getDrops();
-                for (NPC npc : getNPCsNearBlock(world, x, y, z, 32)) {
-                    if (npc.isSpawned() && npc.getEntity() instanceof Player npcPlayer) {
-                        for (ItemStack drop : drops) {
-                            npcPlayer.getInventory().addItem(drop.clone());
-                        }
-                        break; // first match wins; list is not distance-sorted
-                    }
+                // Roblox player is now a real Bukkit player. Use breakNaturally with their
+                // held tool so Fortune / Silk Touch enchantments apply correctly, and drops
+                // are spawned as item entities near the bot — the bot picks them up naturally.
+                Player robloxPlayer = playerName != null ? Bukkit.getPlayer(playerName) : null;
+                if (robloxPlayer != null) {
+                    ItemStack tool = robloxPlayer.getInventory().getItemInMainHand();
+                    block.breakNaturally(tool);
+                } else {
+                    block.breakNaturally();
                 }
-
-                block.setType(Material.AIR);
             }
         }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
-    }
-
-    private java.util.List<NPC> getNPCsNearBlock(World world, int bx, int by, int bz, double maxDist) {
-        java.util.List<NPC> nearby = new java.util.ArrayList<>();
-        for (String name : NPCHandler.getConnectedPlayerNames()) {
-            NPC npc = NPCHandler.getNPC(name);
-            if (npc == null || !npc.isSpawned()) continue;
-            Location npcLoc = npc.getEntity().getLocation();
-            if (!npcLoc.getWorld().equals(world)) continue;
-            double dx = npcLoc.getX() - bx, dz = npcLoc.getZ() - bz;
-            if (Math.sqrt(dx * dx + dz * dz) <= maxDist) nearby.add(npc);
-        }
-        return nearby;
     }
 
     private void toggleBlock(World world, int x, int y, int z) {
@@ -148,79 +150,63 @@ public class POSTHandler {
             @Override
             public void run() {
                 Block block = world.getBlockAt(x, y, z);
-                Material material = block.getType();
-                String materialName = material.name();
-
-                if (materialName.endsWith("_BUTTON")) {
-                    toggleButton(block);
-                } else if (materialName.endsWith("_DOOR")) {
-                    toggleDoor(block);
-                } else if (materialName.endsWith("_FENCE_GATE")) {
-                    toggleFenceGate(block);
-                } else if (materialName.endsWith("_TRAPDOOR")) {
-                    toggleTrapdoor(block);
-                } else if (material == Material.LEVER) {
-                    toggleLever(block);
-                } else {
-                    getLogger().warning("Material at " + block.getX() + ", " + block.getY() + ", " + block.getZ() + " is not supported by POST toggle.");
-                }
+                String name = block.getType().name();
+                if (name.endsWith("_BUTTON"))      toggleButton(block);
+                else if (name.endsWith("_DOOR"))   toggleDoor(block);
+                else if (name.endsWith("_FENCE_GATE")) toggleFenceGate(block);
+                else if (name.endsWith("_TRAPDOOR")) toggleTrapdoor(block);
+                else if (block.getType() == Material.LEVER) toggleLever(block);
+                else getLogger().warning("POST toggle: unsupported material at "
+                        + block.getX() + "," + block.getY() + "," + block.getZ());
             }
         }.runTask(JavaPlugin.getPlugin(CrossplayPackage.class));
     }
 
     private void toggleLever(Block block) {
-        BlockData blockData = block.getBlockData();
-        if (blockData instanceof Powerable powerable) {
-            powerable.setPowered(!powerable.isPowered());
-            block.setBlockData(powerable);
-            if(powerable.isPowered()) {
-                block.getWorld().playSound(block.getLocation(), Sound.BLOCK_STONE_BUTTON_CLICK_OFF, 1.0f, 1.0f);
-            } else {
-                block.getWorld().playSound(block.getLocation(), Sound.BLOCK_STONE_BUTTON_CLICK_ON, 1.0f, 1.0f);
-            }
+        if (block.getBlockData() instanceof Powerable p) {
+            p.setPowered(!p.isPowered());
+            block.setBlockData(p);
+            Sound sound = p.isPowered()
+                    ? Sound.BLOCK_STONE_BUTTON_CLICK_OFF : Sound.BLOCK_STONE_BUTTON_CLICK_ON;
+            block.getWorld().playSound(block.getLocation(), sound, 1.0f, 1.0f);
         }
     }
 
     private void toggleButton(Block block) {
-        BlockData blockData = block.getBlockData();
-        if (blockData instanceof Powerable powerable) {
-            powerable.setPowered(!powerable.isPowered());
-            block.setBlockData(powerable);
+        if (block.getBlockData() instanceof Powerable p) {
+            p.setPowered(!p.isPowered());
+            block.setBlockData(p);
             block.getWorld().playSound(block.getLocation(), Sound.BLOCK_STONE_BUTTON_CLICK_ON, 1.0f, 1.0f);
-
             Bukkit.getScheduler().runTaskLater(JavaPlugin.getPlugin(CrossplayPackage.class), () -> {
-                powerable.setPowered(!powerable.isPowered());
-                block.setBlockData(powerable);
+                p.setPowered(!p.isPowered());
+                block.setBlockData(p);
                 block.getWorld().playSound(block.getLocation(), Sound.BLOCK_STONE_BUTTON_CLICK_OFF, 1.0f, 1.0f);
             }, 20L);
         }
     }
 
     private void toggleDoor(Block block) {
-        BlockData blockData = block.getBlockData();
-        if (blockData instanceof Openable openable) {
-            openable.setOpen(!openable.isOpen());
-            block.setBlockData(openable);
+        if (block.getBlockData() instanceof Openable o) {
+            o.setOpen(!o.isOpen());
+            block.setBlockData(o);
             block.getWorld().playSound(block.getLocation(), Sound.BLOCK_WOODEN_DOOR_OPEN, 1.0f, 1.0f);
         }
     }
 
     private void toggleFenceGate(Block block) {
-        BlockData blockData = block.getBlockData();
-        if (blockData instanceof Openable openable) {
-            boolean nowOpen = !openable.isOpen();
-            openable.setOpen(nowOpen);
-            block.setBlockData(openable);
+        if (block.getBlockData() instanceof Openable o) {
+            boolean nowOpen = !o.isOpen();
+            o.setOpen(nowOpen);
+            block.setBlockData(o);
             Sound sound = nowOpen ? Sound.BLOCK_FENCE_GATE_OPEN : Sound.BLOCK_FENCE_GATE_CLOSE;
             block.getWorld().playSound(block.getLocation(), sound, 1.0f, 1.0f);
         }
     }
 
     private void toggleTrapdoor(Block block) {
-        BlockData blockData = block.getBlockData();
-        if (blockData instanceof Openable openable) {
-            openable.setOpen(!openable.isOpen());
-            block.setBlockData(openable);
+        if (block.getBlockData() instanceof Openable o) {
+            o.setOpen(!o.isOpen());
+            block.setBlockData(o);
             block.getWorld().playSound(block.getLocation(), Sound.BLOCK_WOODEN_TRAPDOOR_OPEN, 1.0f, 1.0f);
         }
     }

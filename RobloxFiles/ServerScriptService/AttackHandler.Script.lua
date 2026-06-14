@@ -7,7 +7,7 @@ attackEvent.Parent = ReplicatedStorage
 
 local attackUrl = "http://" .. ReplicatedStorage.IP.Value .. "/attack"
 
--- Server-side cooldown per Roblox player (prevents spam)
+-- Server-side cooldown per Roblox player
 local COOLDOWN = 0.5
 local lastAttack = {}
 
@@ -18,8 +18,14 @@ attackEvent.OnServerEvent:Connect(function(player, targetName)
 	if lastAttack[player] and now - lastAttack[player] < COOLDOWN then return end
 	lastAttack[player] = now
 
-	-- POST directly to /attack — more reliable than running /damage command
-	local data = HttpService:JSONEncode({ target = targetName, damage = 1.0 })
+	-- Include attacker name so the Java side can attribute the hit to the
+	-- Roblox player's real ServerPlayer via a proper attack packet.
+	local data = HttpService:JSONEncode({
+		attacker = player.Name,
+		target   = targetName,
+		damage   = 1.0,
+	})
+
 	local ok, err = pcall(function()
 		HttpService:PostAsync(attackUrl, data, Enum.HttpContentType.ApplicationJson, false)
 	end)

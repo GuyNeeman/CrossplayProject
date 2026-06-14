@@ -1,6 +1,5 @@
 package xyz.crossplayproject;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -17,52 +16,46 @@ public class CrossplayPackage extends JavaPlugin {
     private EntityHandler entityHandler;
     private POSTHandler postHandler;
     private CrossChat crossChat;
-    private NPCHandler npcHandler;
     private CommandHandler commandHandler;
     private Service sparkService;
-    private int sparkPort;
 
     @Override
     public void onEnable() {
-
-        if (!getDataFolder().exists()) {
-            getDataFolder().mkdir();
-        }
+        if (!getDataFolder().exists()) getDataFolder().mkdir();
         saveDefaultConfig();
 
         FileConfiguration config = getConfig();
-        sparkPort = config.getInt("webserver.port", 4567);
+        int sparkPort = config.getInt("webserver.port", 4567);
 
         Set<Material> biomeSensitiveBlocks = loadMaterials(config.getStringList("blocks.biomeSensitive"));
-        Set<Material> nonObstructingBlocks = loadMaterials(config.getStringList("blocks.nonObstructing"));
+        Set<Material> nonObstructingBlocks  = loadMaterials(config.getStringList("blocks.nonObstructing"));
         boolean enableCulling = config.getBoolean("enableCulling", false);
-        blockHandler = new BlockHandler(biomeSensitiveBlocks, nonObstructingBlocks, enableCulling);
-        entityHandler = new EntityHandler();
-        postHandler = new POSTHandler();
-        crossChat = new CrossChat();
-        npcHandler = new NPCHandler();
-        commandHandler = new CommandHandler();
 
-        setupSpark();
+        blockHandler    = new BlockHandler(biomeSensitiveBlocks, nonObstructingBlocks, enableCulling);
+        entityHandler   = new EntityHandler();
+        postHandler     = new POSTHandler();
+        crossChat       = new CrossChat();
+        commandHandler  = new CommandHandler();
+
+        setupSpark(sparkPort);
         crossChat.startBroadcastTask();
 
         getServer().getPluginManager().registerEvents(crossChat, this);
-        getServer().getPluginManager().registerEvents(npcHandler, this);
         getServer().getPluginManager().registerEvents(entityHandler, this);
-        // Keep /players, /mobs, /world, /spawn snapshots fresh on the main thread so
-        // Spark handler threads never touch Bukkit API directly.
+
+        // Keep /players, /mobs, /world, /spawn snapshots current on the main thread
+        // so Spark handler threads never need to touch the Bukkit API.
         getServer().getScheduler().runTaskTimer(this, entityHandler::refreshSnapshots, 0L, 2L);
 
-        getLogger().info("CrossplayPackage has been enabled!");
+        getLogger().info("CrossplayPackage enabled — Geyser-style proxy mode active.");
     }
 
-    private Set<Material> loadMaterials(List<String> materialNames) {
-        return materialNames.stream()
+    private Set<Material> loadMaterials(List<String> names) {
+        return names.stream()
                 .map(name -> {
-                    try {
-                        return Material.valueOf(name);
-                    } catch (IllegalArgumentException e) {
-                        getLogger().warning("Invalid material name in config: " + name);
+                    try { return Material.valueOf(name); }
+                    catch (IllegalArgumentException e) {
+                        getLogger().warning("Invalid material in config: " + name);
                         return null;
                     }
                 })
@@ -70,9 +63,9 @@ public class CrossplayPackage extends JavaPlugin {
                 .collect(Collectors.toSet());
     }
 
-    private void setupSpark() {
+    private void setupSpark(int port) {
         sparkService = Service.ignite();
-        sparkService.port(sparkPort);
+        sparkService.port(port);
 
         blockHandler.setupRoutes(sparkService);
         entityHandler.setupRoutes(sparkService);
@@ -80,22 +73,52 @@ public class CrossplayPackage extends JavaPlugin {
         crossChat.setupRoutes(sparkService);
         commandHandler.setupRoutes(sparkService);
 
-        if (!Bukkit.getPluginManager().isPluginEnabled("Citizens")) {
-            getLogger().warning("Citizens plugin is not installed or enabled. NPCHandler disabled.");
-            npcHandler.disabledRoute(sparkService);
-        } else {
-            npcHandler.setupRoutes(sparkService);
-        }
+        // /npc route: Roblox player position updates → bot session movement
+        sparkService.post("/npc", (req, res) -> {
+            try {
+                NpcUpdate update = new com.google.gson.Gson().fromJson(req.body(), NpcUpdate.class);
+                if (update == null || update.user == null) { res.status(400); return "Bad request"; }
+
+                if (update.disconnect) {
+                    RobloxSessionManager.disconnect(update.user);
+                } else {
+                    RobloxBotSession session = RobloxSessionManager.get(update.user);
+                    if (session == null || !session.isConnected()) {
+                        RobloxSessionManager.connect(update.user);
+                        // Session connecting — movement will start flowing on next poll
+                    } else if (session.isActive()) {
+                        // Coordinate mapping: Roblox 3-stud grid → 1 MC block
+                        // +0.5 centres the player inside the block, matching Citizens NPC placement
+                        session.sendMovement(
+                                update.x + 0.5, update.y, update.z + 0.5,
+                                update.yaw, update.pitch, true
+                        );
+                    }
+                }
+                return "OK";
+            } catch (Exception e) {
+                getLogger().warning("[Crossplay] /npc error: " + e.getMessage());
+                res.status(500);
+                return "Internal Server Error";
+            }
+        });
+    }
+
+    /** POJO for the /npc POST body sent by NPCHandler.Script.lua */
+    private static class NpcUpdate {
+        String user;
+        double x, y, z;
+        float yaw, pitch;
+        boolean disconnect;
     }
 
     @Override
     public void onDisable() {
-        npcHandler.cleanup();
-
+        RobloxSessionManager.disconnectAll();
         if (sparkService != null) {
             sparkService.stop();
             sparkService.awaitStop();
         }
-        getLogger().info("CrossplayPackage has been disabled!");
+        getLogger().info("CrossplayPackage disabled.");
     }
 }

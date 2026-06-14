@@ -79,7 +79,7 @@ public class CrossChat implements Listener {
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
         String cmd = event.getMessage().toLowerCase().trim();
         if (cmd.equals("/list") || cmd.startsWith("/list ")) {
-            java.util.Set<String> robloxPlayers = NPCHandler.getConnectedPlayerNames();
+            java.util.Set<String> robloxPlayers = RobloxSessionManager.connectedNames();
             if (!robloxPlayers.isEmpty()) {
                 event.getPlayer().sendMessage(
                     "§b[Roblox] §fConnected (" + robloxPlayers.size() + "): §e" + String.join("§f, §e", robloxPlayers)
