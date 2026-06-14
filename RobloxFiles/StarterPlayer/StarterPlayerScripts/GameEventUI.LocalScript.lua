@@ -185,11 +185,14 @@ respawnBtn.TextScaled             = true
 respawnBtn.ZIndex                 = 11
 respawnBtn.Parent                 = deathScreen
 
-local respawnEvent = ReplicatedStorage:WaitForChild("RespawnEvent")
-
-respawnBtn.MouseButton1Click:Connect(function()
-	deathScreen.Visible = false
-	respawnEvent:FireServer()
+-- Wire up the button in a separate thread so WaitForChild can't block
+-- the rest of the event handler (titles, health) if the server script loads slowly.
+task.spawn(function()
+	local respawnEvent = ReplicatedStorage:WaitForChild("RespawnEvent")
+	respawnBtn.MouseButton1Click:Connect(function()
+		deathScreen.Visible = false
+		respawnEvent:FireServer()
+	end)
 end)
 
 -- ── Event dispatcher ───────────────────────────────────────────────────────
